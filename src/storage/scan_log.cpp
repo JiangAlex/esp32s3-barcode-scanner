@@ -5,6 +5,7 @@
 
 #include "scan_log.h"
 #include <ArduinoJson.h>
+#include <SD.h>
 #include "sd_card.h"
 #include "config/config.h"
 

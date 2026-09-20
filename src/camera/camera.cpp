@@ -1,6 +1,7 @@
 /**
  * @file camera.cpp
- * @brief OV2640 camera driver implementation for ESP32-S3
+ * @brief OV5640/OV2640 camera driver implementation for ESP32-S3
+ *        (Waveshare ESP32-S3-Touch-LCD-2, 24-pin FPC camera interface)
  */
 
 #include "camera.h"
@@ -48,6 +49,11 @@ bool camera_init(void) {
     // Adjust sensor settings for barcode scanning
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
+        // OV5640 has a flipped/mirrored orientation vs OV2640 on this module
+        if (s->id.PID == OV5640_PID) {
+            s->set_vflip(s, 1);
+            s->set_hmirror(s, 0);
+        }
         s->set_brightness(s, 1);        // Slightly brighter
         s->set_contrast(s, 1);          // Higher contrast for barcodes
         s->set_saturation(s, -2);       // Reduce saturation (grayscale anyway)
@@ -58,9 +64,12 @@ bool camera_init(void) {
         s->set_gain_ctrl(s, 1);         // Auto gain
         s->set_agc_gain(s, 0);
         s->set_gainceiling(s, (gainceiling_t)6);
+
+        Serial.printf("[CAM] Sensor PID: 0x%x initialized (QVGA Grayscale)\n", s->id.PID);
+    } else {
+        Serial.println("[CAM] Sensor handle unavailable");
     }
 
-    Serial.println("[CAM] OV2640 initialized (QVGA Grayscale)");
     return true;
 }
 

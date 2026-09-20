@@ -1,6 +1,9 @@
 /**
  * @file sd_card.cpp
- * @brief SD card SPI driver implementation (VSPI / SPI3)
+ * @brief SD card SPI driver implementation
+ *        Shares the FSPI (SPI2) bus with the ST7789 LCD; only CS differs.
+ *        LovyanGFX runs in bus_shared mode so display and SD access interleave
+ *        safely over the same SCLK/MOSI/MISO lines.
  */
 
 #include "sd_card.h"
@@ -9,7 +12,7 @@
 #include "config/pinout.h"
 #include "config/config.h"
 
-static SPIClass sd_spi(SPI3_HOST);  // VSPI
+static SPIClass sd_spi(FSPI);       // Same host as the LCD (SPI2 / FSPI)
 static bool _mounted = false;
 
 bool sd_card_init(void) {

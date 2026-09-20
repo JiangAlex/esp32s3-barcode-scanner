@@ -2,7 +2,7 @@
  * @file main.cpp
  * @brief ESP32-S3 Barcode Scanner — Main Entry Point
  *
- * Integrates: OV2640 Camera, TFT LCD (LVGL), SD Card, MQTT, Barcode Decode/Generate
+ * Integrates: OV5640 Camera, ST7789 TFT LCD (LVGL + CST816D touch), SD Card, MQTT, Barcode Decode/Generate
  */
 
 #include <Arduino.h>

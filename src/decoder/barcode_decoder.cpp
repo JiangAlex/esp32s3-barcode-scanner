@@ -24,15 +24,17 @@ extern "C" {
 
 static struct quirc* qr_decoder = nullptr;
 
-// ─── Buzzer feedback ────────────────────────────────────────────────────────
+// ─── Buzzer feedback (optional — no onboard buzzer on this board) ───────────
 
 static void beep_success(void) {
+#if BUZZER_ENABLED
     ledcSetup(BUZZER_PWM_CH, BUZZER_FREQ, 8);
     ledcAttachPin(BUZZER_PIN, BUZZER_PWM_CH);
     ledcWrite(BUZZER_PWM_CH, 128);
     delay(SCAN_BEEP_DURATION_MS);
     ledcWrite(BUZZER_PWM_CH, 0);
     ledcDetachPin(BUZZER_PIN);
+#endif
 }
 
 // ─── Public functions ───────────────────────────────────────────────────────

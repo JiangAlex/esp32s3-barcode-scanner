@@ -7,32 +7,35 @@
 #include <LovyanGFX.hpp>
 #include "config/pinout.h"
 #include "config/config.h"
+#include "input/touch.h"
 
 // ─── LovyanGFX Panel Configuration ─────────────────────────────────────────
 
 class LGFX : public lgfx::LGFX_Device {
-    lgfx::Panel_ILI9341 _panel_instance;
+    lgfx::Panel_ST7789 _panel_instance;
     lgfx::Bus_SPI _bus_instance;
     lgfx::Light_PWM _light_instance;
 
 public:
     LGFX(void) {
-        // SPI bus configuration
+        // SPI bus configuration (shared with SD card)
         {
             auto cfg = _bus_instance.config();
-            cfg.spi_host = SPI2_HOST;       // HSPI
+            cfg.spi_host = SPI2_HOST;       // FSPI (ESP32-S3)
             cfg.spi_mode = 0;
             cfg.freq_write = TFT_SPI_FREQ;
             cfg.freq_read = 16000000;
+            cfg.spi_3wire = false;
+            cfg.use_lock = true;            // Required for shared bus
             cfg.pin_sclk = TFT_PIN_SCLK;
             cfg.pin_mosi = TFT_PIN_MOSI;
-            cfg.pin_miso = -1;              // Not needed for display
+            cfg.pin_miso = TFT_PIN_MISO;    // Needed when bus is shared with SD
             cfg.pin_dc = TFT_PIN_DC;
             _bus_instance.config(cfg);
             _panel_instance.setBus(&_bus_instance);
         }
 
-        // Panel configuration
+        // Panel configuration (ST7789T3, IPS)
         {
             auto cfg = _panel_instance.config();
             cfg.pin_cs = TFT_PIN_CS;
@@ -48,10 +51,10 @@ public:
             cfg.dummy_read_pixel = 8;
             cfg.dummy_read_bits = 1;
             cfg.readable = false;
-            cfg.invert = false;
+            cfg.invert = DISP_INVERT;       // ST7789T3 IPS needs inversion
             cfg.rgb_order = false;
             cfg.dlen_16bit = false;
-            cfg.bus_shared = false;
+            cfg.bus_shared = DISP_BUS_SHARED;  // Share SPI bus with SD card
             _panel_instance.config(cfg);
         }
 
@@ -97,6 +100,22 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
     lv_disp_flush_ready(drv);
 }
 
+// ─── LVGL touch (pointer) input callback ────────────────────────────────────
+
+static lv_indev_drv_t indev_drv;
+
+static void lvgl_touch_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
+    uint16_t x = 0, y = 0;
+    touch_read();
+    if (touch_get_coordinates(&x, &y)) {
+        data->point.x = x;
+        data->point.y = y;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
 // ─── Public functions ───────────────────────────────────────────────────────
 
 void display_init(void) {
@@ -131,6 +150,15 @@ void display_init(void) {
     disp_drv.flush_cb = lvgl_flush_cb;
     disp_drv.draw_buf = &draw_buf;
     disp = lv_disp_drv_register(&disp_drv);
+
+    // Initialize CST816D touch and register pointer input device
+    if (touch_init(TFT_WIDTH, TFT_HEIGHT, DISP_ROTATION)) {
+        lv_indev_drv_init(&indev_drv);
+        indev_drv.type = LV_INDEV_TYPE_POINTER;
+        indev_drv.disp = disp;
+        indev_drv.read_cb = lvgl_touch_cb;
+        lv_indev_drv_register(&indev_drv);
+    }
 }
 
 void display_set_brightness(uint8_t brightness) {

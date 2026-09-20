@@ -1,6 +1,6 @@
 /**
  * @file camera.h
- * @brief OV2640 camera driver for ESP32-S3
+ * @brief OV5640/OV2640 camera driver for ESP32-S3
  */
 
 #ifndef CAMERA_H
@@ -9,7 +9,7 @@
 #include <esp_camera.h>
 
 /**
- * @brief Initialize OV2640 camera module.
+ * @brief Initialize the camera module (OV5640, OV2640-compatible).
  * @return true on success, false on failure
  */
 bool camera_init(void);
