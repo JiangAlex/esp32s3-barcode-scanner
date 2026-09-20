@@ -1,77 +1,350 @@
 /**
  * @file main.cpp
- * @brief ESP32-S3 Barcode Scanner — Main Entry Point
+ * @brief ESP32-S3 barcode scanner — factory approach
  *
- * Integrates: OV5640 Camera, ST7789 TFT LCD (LVGL + CST816D touch), SD Card, MQTT, Barcode Decode/Generate
+ * Key fixes from factory analysis:
+ * 1. Draw buffers use heap_caps_malloc(MALLOC_CAP_SPIRAM) — fallback to DRAM if PSRAM absent
+ * 2. LVGL tick via esp_timer every 2ms (matching factory bsp_lv_port.cpp)
+ * 3. I2C mutex + bsp_i2c style read (matching factory bsp_i2c.cpp)
+ * 4. Touch init disabled — no CST816 on this board
  */
 
 #include <Arduino.h>
-#include "config/config.h"
+#include <LovyanGFX.hpp>
+#include <lvgl.h>
+#include <Wire.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "config/pinout.h"
 #include "display/display.h"
-#include "camera/camera.h"
-#include "storage/sd_card.h"
-#include "network/wifi_manager.h"
-#include "network/mqtt_client.h"
-#include "decoder/barcode_decoder.h"
-#include "generator/barcode_generator.h"
-#include "storage/scan_log.h"
-#include "ui/ui_main.h"
+
+// ─── I2C ────────────────────────────────────────────────────────────────────
+
+static SemaphoreHandle_t g_i2c_mux = NULL;
+static bool i2c_lock(int ms) {
+    if (!g_i2c_mux) return true;
+    TickType_t t = (ms==-1) ? portMAX_DELAY : pdMS_TO_TICKS(ms);
+    return xSemaphoreTakeRecursive(g_i2c_mux, t) == pdTRUE;
+}
+static void i2c_unlock(void) { if (g_i2c_mux) xSemaphoreGiveRecursive(g_i2c_mux); }
+
+static bool i2c_reg_read(uint8_t addr, uint8_t reg, uint8_t* data, size_t len) {
+    if (!i2c_lock(-1)) return false;
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(true) != 0) { i2c_unlock(); return false; }
+    Wire.requestFrom(addr, len);
+    for (size_t i = 0; i < len && Wire.available(); i++) *data++ = Wire.read();
+    i2c_unlock();
+    return true;
+}
+
+// ─── LVGL ───────────────────────────────────────────────────────────────────
+
+static SemaphoreHandle_t g_lvgl_mux = NULL;
+static bool lvgl_lock(int ms) {
+    TickType_t t = (ms==-1) ? portMAX_DELAY : pdMS_TO_TICKS(ms);
+    return xSemaphoreTakeRecursive(g_lvgl_mux, t) == pdTRUE;
+}
+static void lvgl_unlock(void) { xSemaphoreGiveRecursive(g_lvgl_mux); }
+
+// ─── Display (LovyanGFX — shared instance from display.cpp) ──────────────────
+
+// Use the shared LGFX instance from display.cpp to avoid duplicate SPI init
+static lgfx::LGFX_Device& tft = display_get_tft();
+
+// RGB565 color constants
+// ARM is little-endian: lv_color_t.full is uint16_t, stored as LE bytes.
+// lv_color_hex(hex) treats hex as ARGB8888 and converts to RGB565 - WRONG approach for raw RGB565.
+// LVGL v8: lv_color_hex expects ARGB8888 input.
+// But lv_color_t{ .full = N } directly sets the uint16_t RGB565 value.
+// Use .full approach for predictable RGB565 values on ARM.
+// COL_GREEN = 0x07E0 = RGB(0, 252, 0) in RGB565
+// COL_RED   = 0xF800 = RGB(248, 0, 0) in RGB565
+static const lv_color_t COL_GREEN    = { .full = 0x07E0 };   // green RGB565
+static const lv_color_t COL_RED      = { .full = 0xF800 };   // red RGB565
+static const lv_color_t COL_WHITE    = { .full = 0xFFFF };   // white RGB565
+
+static bool g_ui_ready = false;       // set true after all widgets created
+static bool g_scanning = false;
+static bool g_last_boot = true;          // BOOT button state (active LOW, default HIGH)
+static bool g_boot_was_pressed = false;  // debounce: already handled this press
+static bool g_ui_update_pending = false;  // LVGL UI needs update
+static lv_obj_t* g_scan_btn = nullptr;  // LVGL button widget (updated from loop)
+static lv_obj_t* g_btn_label = nullptr;  // button's label child
+
+// Update the scan button to reflect current g_scanning state
+// All LVGL calls must be made from within LVGL task (lvgl_lock held)
+static void update_btn_ui(void) {
+    if (!g_ui_ready) return;
+    if (!g_scan_btn || !g_btn_label) {
+        Serial.println("[UI] null ptr");
+        return;
+    }
+
+    // Delete old button and recreate with new color
+    lv_obj_del(g_scan_btn);
+
+    // Recreate button
+    g_scan_btn = lv_btn_create(lv_scr_act());
+    lv_obj_set_width(g_scan_btn, 200);
+    lv_obj_set_height(g_scan_btn, 60);
+    lv_obj_center(g_scan_btn);
+    lv_obj_add_flag(g_scan_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(g_scan_btn, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_scan_btn, g_scanning ? COL_RED : COL_GREEN, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_scan_btn, LV_OPA_COVER, LV_PART_MAIN);
+
+    // Recreate label
+    g_btn_label = lv_label_create(g_scan_btn);
+    lv_label_set_text(g_btn_label, g_scanning ? "STOP" : "SCAN");
+    lv_obj_center(g_btn_label);
+    lv_obj_set_style_text_color(g_btn_label, (lv_color_t){ .full = 0x0000 }, LV_PART_MAIN);
+    lv_obj_set_style_text_font(g_btn_label, &lv_font_montserrat_16, LV_PART_MAIN);
+
+    // Direct LovyanGFX draw to bypass LVGL flush pipeline
+    uint16_t col = g_scanning ? 0xF800 : 0x07E0;
+    tft.fillRect(20, 130, 200, 60, col);
+    Serial.printf("[UI] recreated btn=%s bg=0x%04X tft_draw\n",
+        g_scanning ? "STOP" : "SCAN", col);
+}
+
+// Toggle scan on/off (called from loop)
+static void toggle_scan(void) {
+    g_scanning = !g_scanning;
+    g_ui_update_pending = true;
+    Serial.printf("[SCAN] toggled: %s\n", g_scanning ? "ON" : "OFF");
+}
+
+// ─── LVGL draw buffers (factory style: MALLOC_CAP_SPIRAM) ────────────────────
+// heap_caps_malloc with MALLOC_CAP_SPIRAM falls back to DRAM if PSRAM absent
+
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t* buf1 = nullptr;
+static lv_color_t* buf2 = nullptr;
+
+// ─── LVGL display driver ─────────────────────────────────────────────────────
+
+static void flush_cb(lv_disp_drv_t* d, const lv_area_t* a, lv_color_t* c) {
+    uint32_t w=a->x2-a->x1+1, h=a->y2-a->y1+1;
+    uint32_t npixels = w * h;
+    static uint32_t cnt = 0;
+    if (cnt < 5) {
+        Serial.printf("[FLUSH] #%u %ux%u px=0x%04X\n", cnt, w, h, c[0].full);
+        cnt++;
+    }
+    tft.startWrite();
+    tft.setAddrWindow(a->x1,a->y1,w,h);
+    tft.writePixels((uint16_t*)c, npixels);
+    tft.endWrite();
+    lv_disp_flush_ready(d);
+}
+
+// ─── LVGL tick timer (factory style: esp_timer every 2ms) ────────────────────
+
+static void lvgl_tick_cb(void* arg) {
+    lv_tick_inc(2);  // 2ms period
+}
+
+// ─── LVGL task (factory style: Core 1 + recursive mutex) ────────────────────
+
+static void lvgl_task(void* param) {
+    Serial.println("[LVGL] task started on Core 1");
+    while (1) {
+        if (lvgl_lock(1000)) {
+            if (g_ui_update_pending) {
+                g_ui_update_pending = false;
+                update_btn_ui();
+            }
+            lv_timer_handler();
+            lvgl_unlock();
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+// ─── QMI8658 IMU ────────────────────────────────────────────────────────────
+
+static void init_qmi8658(void) {
+    uint8_t id = 0;
+    if (i2c_reg_read(IMU_I2C_ADDR, 0x0F, &id, 1)) {
+        Serial.printf("[QMI8658] ID=0x%02X\n", id);
+    } else {
+        Serial.println("[QMI8658] read failed");
+    }
+}
+
+// ─── I2C scan ───────────────────────────────────────────────────────────────
+
+static void i2c_scan(void) {
+    Serial.println("[I2C] scan:");
+    for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission(true) == 0) Serial.printf("  0x%02X\n", a);
+    }
+}
+
+// ─── Setup ──────────────────────────────────────────────────────────────────
 
 void setup() {
+    // Confirm CPU is running
+    pinMode(48, OUTPUT);
+    digitalWrite(48, HIGH);
+    delay(100);
+    digitalWrite(48, LOW);
+    delay(100);
+    digitalWrite(48, HIGH);
+
     Serial.begin(115200);
-    delay(500);
-    Serial.println("================================");
-    Serial.printf("%s v%s\n", BOARD_NAME, FW_VERSION);
-    Serial.println("================================");
+    delay(200);  // wait for CDC enumeration
+    Serial.println("=== SETUP ===");
+    Serial.flush();
 
-    // Initialize display (TFT + LVGL)
+    Wire.begin(I2C_SHARED_SDA, I2C_SHARED_SCL);
+    Wire.setClock(400000);
+    i2c_scan();
+
+    init_qmi8658();
+
     display_init();
-    Serial.println("[OK] Display initialized");
 
-    // Initialize SD card
-    if (sd_card_init()) {
-        Serial.println("[OK] SD card initialized");
-    } else {
-        Serial.println("[WARN] SD card not available");
+    // Skip color splash - may block SPI
+    tft.fillScreen(TFT_BLACK);
+    Serial.println("[DISPLAY] init done");
+    Serial.flush();
+
+    // LVGL draw buffers — factory style (MALLOC_CAP_SPIRAM, 1/4 screen each)
+    // PSRAM: use PSRAM if available, else DRAM
+    // Note: DRAM is ~328KB total, need to fit 2 buffers + LVGL heap + app heap
+    size_t buf_size = (TFT_WIDTH * TFT_HEIGHT / 4) * sizeof(lv_color_t);  // 1/4 screen = ~37.5KB
+    buf1 = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    buf2 = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    Serial.printf("[LVGL] buf1=%p buf2=%p (PSRAM buffers, %d bytes each)\n",
+                  (void*)buf1, (void*)buf2, (int)buf_size);
+    if (!buf1) { free(buf2); buf2 = nullptr; }
+    if (!buf1 || !buf2) {
+        Serial.println("[LVGL] PSRAM alloc failed, using DRAM");
+        free(buf1); free(buf2);
+        buf1 = (lv_color_t*)malloc(buf_size);
+        buf2 = (lv_color_t*)malloc(buf_size);
+        Serial.printf("[LVGL] DRAM buf1=%p buf2=%p\n", (void*)buf1, (void*)buf2);
+    }
+    if (!buf1 || !buf2) {
+        Serial.println("[LVGL] FATAL: buffer alloc failed");
+        while(1) delay(1000);
     }
 
-    // Initialize camera
-    if (camera_init()) {
-        Serial.println("[OK] Camera initialized");
-    } else {
-        Serial.println("[ERR] Camera init failed");
-    }
+    // LVGL init
+    g_lvgl_mux = xSemaphoreCreateRecursiveMutex();
+    lv_init();
+    size_t buf_pixels = TFT_WIDTH * TFT_HEIGHT / 4;  // 1/4 screen in pixels
+    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, buf_pixels);
 
-    // Initialize WiFi + MQTT
-    wifi_manager_init();
-    mqtt_client_init();
-    Serial.println("[OK] Network initialized");
+    // Display driver
+    lv_disp_drv_t dd; lv_disp_drv_init(&dd);
+    dd.hor_res = TFT_WIDTH; dd.ver_res = TFT_HEIGHT;
+    dd.flush_cb = flush_cb; dd.draw_buf = &draw_buf;
+    dd.full_refresh = 0;  // normal rendering
+    lv_disp_t* disp = lv_disp_drv_register(&dd);
 
-    // Initialize barcode modules
-    barcode_decoder_init();
-    barcode_generator_init();
-    Serial.println("[OK] Barcode modules initialized");
+    // Touch driver (placeholder — no CST816 on this board)
+    // NOTE: LVGL indev timer calls read_cb even if no touch hardware.
+    // For minimal test without input device, skip indev registration entirely.
+    // The read_cb lambda was causing LoadProhibited crashes.
+    // Leaving this section empty until we confirm touch hardware.
+    // lv_indev_drv_t id; lv_indev_drv_init(&id);
+    // id.type = LV_INDEV_TYPE_POINTER;
+    // id.disp = disp;
+    // id.read_cb = [](lv_indev_drv_t* d, lv_indev_data_t* data) {
+    //     data->state = LV_INDEV_STATE_RELEASED;
+    // };
+    // lv_indev_drv_register(&id);
+    (void)disp;  // suppress unused variable warning
 
-    // Initialize scan log
-    scan_log_init();
+    // LVGL tick timer (factory style: esp_timer every 2ms)
+    // Do NOT use LV_TICK_CUSTOM=1 — factory uses esp_timer
+    const esp_timer_create_args_t timer_args = {
+        .callback = &lvgl_tick_cb,
+        .name = "lvgl_tick"
+    };
+    esp_timer_handle_t tick_timer = nullptr;
+    esp_timer_create(&timer_args, &tick_timer);
+    esp_timer_start_periodic(tick_timer, 2000);  // 2ms = 2000us
 
-    // Initialize LVGL UI (must be last — depends on other modules)
-    ui_main_init();
-    Serial.println("[OK] UI initialized");
+    Serial.println("[LVGL] tick timer started (esp_timer 2ms)");
+    Serial.flush();
 
-    Serial.println("================================");
-    Serial.println("System ready.");
-    Serial.println("================================");
+    // ─── LVGL UI Test ───────────────────────────────────────────────────────────
+    lv_obj_t* scr = lv_scr_act();
+
+    // Title label
+    lv_obj_t* title = lv_label_create(scr);
+    lv_label_set_text(title, "Scanner Ready");
+    lv_obj_center(title);
+    lv_obj_set_style_text_color(title, (lv_color_t){ .full = 0xFFFF }, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+
+    // Scan button (centered, 200x60)
+    g_scan_btn = lv_btn_create(scr);
+    lv_obj_set_width(g_scan_btn, 200);
+    lv_obj_set_height(g_scan_btn, 60);
+    lv_obj_center(g_scan_btn);
+    lv_obj_add_flag(g_scan_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_radius(g_scan_btn, 12, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(g_scan_btn, COL_GREEN, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(g_scan_btn, LV_OPA_COVER, LV_PART_MAIN);
+
+    // Button label (MUST create explicitly in LVGL 8.x)
+    g_btn_label = lv_label_create(g_scan_btn);
+    lv_label_set_text(g_btn_label, "SCAN");
+    lv_obj_center(g_btn_label);
+    lv_obj_set_style_text_color(g_btn_label, (lv_color_t){ .full = 0x0000 }, LV_PART_MAIN); // black text
+    lv_obj_set_style_text_font(g_btn_label, &lv_font_montserrat_16, LV_PART_MAIN);
+
+    Serial.println("[LVGL] UI widgets created");
+    Serial.println("=== READY ===");
+    g_ui_ready = true;
+
+    // Start LVGL task on Core 1 (matching factory bsp_lv_port_run)
+    xTaskCreatePinnedToCore(lvgl_task, "lvgl", 8192, NULL, 5, NULL, 1);
+
+    Serial.flush();
 }
 
 void loop() {
-    // LVGL task handler
-    lv_timer_handler();
+    // Debug: print GPIO0 state every 100 iterations
+    static uint32_t dbg_cnt = 0;
+    if (dbg_cnt++ % 100 == 0) {
+        Serial.printf("[DBG] GPIO0=%d scanning=%d\n", digitalRead(PIN_BOOT_BTN), g_scanning);
+    }
 
-    // MQTT keep-alive
-    mqtt_client_loop();
+    // Manual test: type 't' in serial monitor to toggle scan
+    if (Serial.available()) {
+        char c = Serial.read();
+        if (c == 't' || c == 'T') {
+            g_scanning = !g_scanning;
+            g_ui_update_pending = true;
+            Serial.printf("[TEST] toggled: %s\n", g_scanning ? "ON" : "OFF");
+        }
+    }
 
-    // Small delay to yield
-    delay(5);
+    // Poll BOOT button (active LOW, pull-up so default HIGH)
+    bool current_boot = digitalRead(PIN_BOOT_BTN);
+    if (!current_boot && !g_boot_was_pressed) {
+        g_boot_was_pressed = true;
+        delay(50);  // debounce: wait for button to settle
+        if (digitalRead(PIN_BOOT_BTN) != LOW) {
+            // Button bounced back up during delay - not a real press
+            g_boot_was_pressed = false;
+        } else {
+            g_scanning = !g_scanning;
+            g_ui_update_pending = true;
+            Serial.printf("[SCAN] toggled: %s\n", g_scanning ? "ON" : "OFF");
+            Serial.flush();
+        }
+    } else if (current_boot) {
+        g_boot_was_pressed = false;
+    }
+    delay(10);
 }
