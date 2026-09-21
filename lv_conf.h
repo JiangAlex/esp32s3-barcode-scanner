@@ -20,8 +20,9 @@
 #define LV_INDEV_DEF_READ_PERIOD 30
 #define LV_DPI_DEF              130
 
-/* Tick source — use Arduino millis() */
-#define LV_TICK_CUSTOM          1
+/* Tick source — driven by esp_timer calling lv_tick_inc(2) in main.cpp.
+ * Must stay 0: LV_TICK_CUSTOM=1 compiles lv_tick_inc() out entirely. */
+#define LV_TICK_CUSTOM          0
 #define LV_TICK_CUSTOM_INCLUDE  "Arduino.h"
 #define LV_TICK_CUSTOM_SYS_TIME_EXPR (millis())
 

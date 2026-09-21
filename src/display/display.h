@@ -7,6 +7,7 @@
 #define DISPLAY_H
 
 #include <lvgl.h>
+#include <LovyanGFX.hpp>
 
 /**
  * @brief Initialize TFT display and LVGL framework.
@@ -24,5 +25,11 @@ void display_set_brightness(uint8_t brightness);
  * @brief Get the LVGL display pointer.
  */
 lv_disp_t* display_get_disp(void);
+
+/**
+ * @brief Get the shared LovyanGFX device instance.
+ *        Exposed so other modules can draw directly without re-initializing SPI.
+ */
+lgfx::LGFX_Device& display_get_tft(void);
 
 #endif /* DISPLAY_H */

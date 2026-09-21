@@ -196,6 +196,11 @@ void setup() {
     delay(100);
     digitalWrite(48, HIGH);
 
+    // BOOT button (GPIO0, active LOW) — must enable internal pull-up explicitly.
+    // GPIO0 is a strapping pin; its pull state after boot is not guaranteed,
+    // so digitalRead() without pinMode() can latch HIGH permanently.
+    pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
+
     Serial.begin(115200);
     delay(200);  // wait for CDC enumeration
     Serial.println("=== SETUP ===");

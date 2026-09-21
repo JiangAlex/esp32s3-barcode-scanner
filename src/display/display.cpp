@@ -168,3 +168,7 @@ void display_set_brightness(uint8_t brightness) {
 lv_disp_t* display_get_disp(void) {
     return disp;
 }
+
+lgfx::LGFX_Device& display_get_tft(void) {
+    return tft;
+}
