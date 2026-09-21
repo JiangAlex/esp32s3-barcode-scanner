@@ -12,6 +12,17 @@
 #define FW_VERSION          "0.1.0"
 #define DEVICE_ID           "esp32-001"
 
+// ─── NVS Settings Persistence ──────────────────────────────────────────────
+// If NVS has stored values they override these defaults.
+// See src/storage/nvs_settings.h
+
+#define DEFAULT_WIFI_SSID       "YOUR_WIFI_SSID"
+#define DEFAULT_WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
+#define DEFAULT_MQTT_BROKER    "192.168.1.100"
+#define DEFAULT_MQTT_PORT      1883
+#define DEFAULT_BRIGHTNESS      200
+#define DEFAULT_LANGUAGE        "en"
+
 // ─── WiFi Settings ──────────────────────────────────────────────────────────
 
 #define WIFI_SSID           "YOUR_WIFI_SSID"

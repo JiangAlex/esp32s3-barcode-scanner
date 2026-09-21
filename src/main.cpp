@@ -17,7 +17,12 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "config/pinout.h"
+#include "config/config.h"
 #include "display/display.h"
+#include "ui/ui_main.h"
+#include "storage/nvs_settings.h"
+#include "power.h"
+#include "camera/camera.h"
 
 // ─── I2C ────────────────────────────────────────────────────────────────────
 
@@ -68,8 +73,6 @@ static const lv_color_t COL_WHITE    = { .full = 0xFFFF };   // white RGB565
 
 static bool g_ui_ready = false;       // set true after all widgets created
 static bool g_scanning = false;
-static bool g_last_boot = true;          // BOOT button state (active LOW, default HIGH)
-static bool g_boot_was_pressed = false;  // debounce: already handled this press
 static bool g_ui_update_pending = false;  // LVGL UI needs update
 static lv_obj_t* g_scan_btn = nullptr;  // LVGL button widget (updated from loop)
 static lv_obj_t* g_btn_label = nullptr;  // button's label child
@@ -219,6 +222,12 @@ void setup() {
     Serial.println("[DISPLAY] init done");
     Serial.flush();
 
+    // Initialize NVS settings persistence
+    nvs_init();
+
+    // Initialize power management
+    power_init();
+
     // LVGL draw buffers — factory style (MALLOC_CAP_SPIRAM, 1/4 screen each)
     // PSRAM: use PSRAM if available, else DRAM
     // Note: DRAM is ~328KB total, need to fit 2 buffers + LVGL heap + app heap
@@ -280,34 +289,16 @@ void setup() {
     Serial.println("[LVGL] tick timer started (esp_timer 2ms)");
     Serial.flush();
 
-    // ─── LVGL UI Test ───────────────────────────────────────────────────────────
-    lv_obj_t* scr = lv_scr_act();
+    // ─── LVGL UI (single-button navigation) ────────────────────────────────────
+    ui_main_init();
 
-    // Title label
-    lv_obj_t* title = lv_label_create(scr);
-    lv_label_set_text(title, "Scanner Ready");
-    lv_obj_center(title);
-    lv_obj_set_style_text_color(title, (lv_color_t){ .full = 0xFFFF }, 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    // Initialize camera AFTER LVGL is set up
+    if (!camera_init()) {
+        Serial.println("[MAIN] Camera init FAILED");
+    } else {
+        Serial.println("[MAIN] Camera init OK");
+    }
 
-    // Scan button (centered, 200x60)
-    g_scan_btn = lv_btn_create(scr);
-    lv_obj_set_width(g_scan_btn, 200);
-    lv_obj_set_height(g_scan_btn, 60);
-    lv_obj_center(g_scan_btn);
-    lv_obj_add_flag(g_scan_btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_radius(g_scan_btn, 12, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(g_scan_btn, COL_GREEN, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(g_scan_btn, LV_OPA_COVER, LV_PART_MAIN);
-
-    // Button label (MUST create explicitly in LVGL 8.x)
-    g_btn_label = lv_label_create(g_scan_btn);
-    lv_label_set_text(g_btn_label, "SCAN");
-    lv_obj_center(g_btn_label);
-    lv_obj_set_style_text_color(g_btn_label, (lv_color_t){ .full = 0x0000 }, LV_PART_MAIN); // black text
-    lv_obj_set_style_text_font(g_btn_label, &lv_font_montserrat_16, LV_PART_MAIN);
-
-    Serial.println("[LVGL] UI widgets created");
     Serial.println("=== READY ===");
     g_ui_ready = true;
 
@@ -318,38 +309,38 @@ void setup() {
 }
 
 void loop() {
-    // Debug: print GPIO0 state every 100 iterations
-    static uint32_t dbg_cnt = 0;
-    if (dbg_cnt++ % 100 == 0) {
-        Serial.printf("[DBG] GPIO0=%d scanning=%d\n", digitalRead(PIN_BOOT_BTN), g_scanning);
-    }
-
-    // Manual test: type 't' in serial monitor to toggle scan
-    if (Serial.available()) {
-        char c = Serial.read();
-        if (c == 't' || c == 'T') {
-            g_scanning = !g_scanning;
-            g_ui_update_pending = true;
-            Serial.printf("[TEST] toggled: %s\n", g_scanning ? "ON" : "OFF");
-        }
-    }
-
     // Poll BOOT button (active LOW, pull-up so default HIGH)
-    bool current_boot = digitalRead(PIN_BOOT_BTN);
-    if (!current_boot && !g_boot_was_pressed) {
-        g_boot_was_pressed = true;
-        delay(50);  // debounce: wait for button to settle
-        if (digitalRead(PIN_BOOT_BTN) != LOW) {
-            // Button bounced back up during delay - not a real press
-            g_boot_was_pressed = false;
+    static bool     g_btn_was_pressed = false;
+    static uint32_t g_btn_press_ms   = 0;
+
+    bool cur = digitalRead(PIN_BOOT_BTN);
+
+    if (!cur && !g_btn_was_pressed) {
+        // Pressed — record time
+        g_btn_was_pressed = true;
+        g_btn_press_ms = millis();
+        power_update_idle_time();  // wake on button press
+    } else if (cur && g_btn_was_pressed) {
+        // Released — determine event type
+        uint32_t held = millis() - g_btn_press_ms;
+        g_btn_was_pressed = false;
+
+        if (held < 300) {
+            ui_nav_event(NAV_NEXT);
         } else {
-            g_scanning = !g_scanning;
-            g_ui_update_pending = true;
-            Serial.printf("[SCAN] toggled: %s\n", g_scanning ? "ON" : "OFF");
-            Serial.flush();
+            ui_nav_event(NAV_CONFIRM);
         }
-    } else if (current_boot) {
-        g_boot_was_pressed = false;
+    } else if (!cur && g_btn_was_pressed) {
+        // Held — check for long-hold (> 2000ms)
+        if ((millis() - g_btn_press_ms) > 2000) {
+            ui_nav_event(NAV_HOME);
+            // Reset so we don't fire HOME again while still holding
+            g_btn_was_pressed = false;
+        }
     }
+
+    // Power management: dim/off screen after idle
+    power_sleep_if_idle();
+
     delay(10);
 }

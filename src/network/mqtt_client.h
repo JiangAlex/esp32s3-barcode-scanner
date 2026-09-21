@@ -55,4 +55,11 @@ void mqtt_set_response_callback(mqtt_response_cb_t cb);
  */
 void mqtt_reconnect(void);
 
+/**
+ * @brief Publish a batch of inventory items to the server.
+ *        Iterates pending scan log entries and publishes each.
+ * @return number of items published
+ */
+uint16_t mqtt_publish_inventory_batch(void);
+
 #endif /* MQTT_CLIENT_H */

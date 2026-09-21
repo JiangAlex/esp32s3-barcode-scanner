@@ -31,4 +31,18 @@ void camera_return_fb(camera_fb_t* fb);
  */
 void camera_deinit(void);
 
+/**
+ * @brief Switch camera to JPEG mode (SVGA) for photo capture.
+ *        Can be called to switch back from grayscale mode.
+ * @param enable true = JPEG/SVGA mode, false = previous/grayscale mode
+ */
+void camera_set_jpeg_mode(bool enable);
+
+/**
+ * @brief Capture a JPEG frame from the camera.
+ *        Must be in JPEG mode (call camera_set_jpeg_mode(true) first).
+ * @return Pointer to JPEG frame buffer (must be returned with camera_return_fb)
+ */
+camera_fb_t* camera_capture_jpeg(void);
+
 #endif /* CAMERA_H */

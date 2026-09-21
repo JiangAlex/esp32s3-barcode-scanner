@@ -1,13 +1,11 @@
 /**
  * @file ui_main.h
- * @brief LVGL multi-page UI framework
+ * @brief LVGL multi-page UI — single-button (BOOT key) navigation
  *
- * Pages:
- *   - Home (menu)
- *   - Scan (camera preview + decode)
- *   - Generate (QR code generation)
- *   - History (scan log list)
- *   - Settings
+ * Navigation:
+ *   - Short press (< 300ms): next item
+ *   - Long press (> 1000ms): confirm/enter
+ *   - Long hold (> 2000ms): go home (from any sub-page)
  */
 
 #ifndef UI_MAIN_H
@@ -15,25 +13,68 @@
 
 #include <lvgl.h>
 
-// UI Pages
+// ─── Page IDs ────────────────────────────────────────────────────────────────
+
 typedef enum {
     UI_PAGE_HOME = 0,
     UI_PAGE_SCAN,
-    UI_PAGE_GENERATE,
-    UI_PAGE_HISTORY,
     UI_PAGE_SETTINGS,
+    UI_PAGE_INVENTORY,
+    UI_PAGE_PHOTO,
     UI_PAGE_COUNT
 } ui_page_t;
 
+// ─── Scan Modes ──────────────────────────────────────────────────────────────
+
+typedef enum {
+    SCAN_MODE_QUERY = 0,   // scan → MQTT query → show result
+    SCAN_MODE_INPUT,        // scan → BLE HID keyboard output
+    SCAN_MODE_INVENTORY,    // scan → add to inventory list
+    SCAN_MODE_COUNT
+} scan_mode_t;
+
+// ─── Navigation Events ────────────────────────────────────────────────────────
+
+typedef enum {
+    NAV_NONE = 0,
+    NAV_NEXT,      // short press: advance to next item
+    NAV_CONFIRM,   // long press: enter / confirm
+    NAV_HOME       // long hold: return to home
+} nav_event_t;
+
+// ─── Menu Items (per page) ────────────────────────────────────────────────────
+
+#define MENU_ITEMS_MAX   5
+
+typedef struct {
+    const char* label;        // display text (ASCII only for now)
+    lv_obj_t*   btn;          // LVGL button widget
+    lv_obj_t*   lbl;          // label inside button
+} menu_item_t;
+
+// ─── Page Data ────────────────────────────────────────────────────────────────
+
+typedef struct {
+    ui_page_t       id;
+    const char*     title;     // page title (ASCII)
+    lv_obj_t*       container; // page container widget
+    menu_item_t*    items;    // array of menu items
+    uint8_t         item_count;
+    int8_t          focused;   // currently focused item index (-1 = no selection)
+} page_data_t;
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
 /**
- * @brief Initialize LVGL UI framework and create all pages.
+ * @brief Initialize UI — create all pages, set up single-button nav.
  */
 void ui_main_init(void);
 
 /**
- * @brief Switch to a specific UI page.
+ * @brief Feed a navigation event from the button handler.
+ *        Call this from loop() when a button event occurs.
  */
-void ui_navigate_to(ui_page_t page);
+void ui_nav_event(nav_event_t ev);
 
 /**
  * @brief Get current active page.
@@ -41,28 +82,55 @@ void ui_navigate_to(ui_page_t page);
 ui_page_t ui_get_current_page(void);
 
 /**
- * @brief Update scan result display on scan page.
- * @param type_name Barcode type string
- * @param content Decoded content
+ * @brief Update scan result text on scan page.
  */
 void ui_show_scan_result(const char* type_name, const char* content);
 
 /**
- * @brief Show warehouse item info on scan page.
- * @param name Item name
- * @param spec Specification
- * @param quantity Quantity
- * @param location Storage location
- * @param supplier Supplier
- */
-void ui_show_item_info(const char* name, const char* spec, int quantity,
-                       const char* location, const char* supplier);
-
-/**
- * @brief Update network status display.
- * @param wifi_connected WiFi connected flag
- * @param mqtt_connected MQTT connected flag
+ * @brief Update status bar (WiFi/MQTT indicators).
  */
 void ui_update_status(bool wifi_connected, bool mqtt_connected);
+
+/**
+ * @brief Get current scan mode.
+ */
+scan_mode_t ui_get_scan_mode(void);
+
+/**
+ * @brief Cycle to next scan mode.
+ */
+void ui_cycle_scan_mode(void);
+
+/**
+ * @brief Handle a completed barcode scan in the current mode.
+ *        Dispatches to MQTT query, BLE HID output, or inventory add.
+ */
+void ui_on_scan(const char* type_name, const char* content);
+
+/**
+ * @brief Get current inventory item count.
+ */
+uint8_t ui_inventory_count(void);
+
+/**
+ * @brief Confirm and upload inventory batch (called from inventory page).
+ */
+void ui_inventory_upload(void);
+
+/**
+ * @brief Clear all inventory items.
+ */
+void ui_inventory_clear(void);
+
+/**
+ * @brief Update photo result text on photo page.
+ * @param status Status message (e.g. "Uploading...", "Success", "Error")
+ * @param result Recognition result text (e.g. "ABC123", "Product Name")
+ */
+void ui_show_photo_result(const char* status, const char* result);
+
+/** Start/stop camera preview on SCAN page. Called when entering/leaving SCAN page. */
+void ui_preview_start(void);
+void ui_preview_stop(void);
 
 #endif /* UI_MAIN_H */

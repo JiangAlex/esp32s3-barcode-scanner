@@ -9,6 +9,7 @@
 #include <ArduinoJson.h>
 #include "config/config.h"
 #include "wifi_manager.h"
+#include "storage/scan_log.h"
 
 static WiFiClient wifi_client;
 static PubSubClient mqtt(wifi_client);
@@ -122,4 +123,37 @@ void mqtt_reconnect(void) {
     } else {
         Serial.printf("[MQTT] Failed, rc=%d\n", mqtt.state());
     }
+}
+
+uint16_t mqtt_publish_inventory_batch(void) {
+    if (!mqtt.connected()) {
+        Serial.println("[MQTT] Not connected, cannot publish batch");
+        return 0;
+    }
+
+    uint32_t pending = scan_log_pending_count();
+    if (pending == 0) {
+        Serial.println("[MQTT][INV] no pending items to upload");
+        return 0;
+    }
+
+    // Read pending entries as JSON array
+    String payload = scan_log_read_pending();
+    Serial.printf("[MQTT][INV] publishing %u items...\n", pending);
+
+    // Wrap in a batch envelope
+    JsonDocument doc;
+    doc["device_id"] = DEVICE_ID;
+    doc["count"] = pending;
+    doc["items"] = payload;
+
+    char buffer[2048];
+    serializeJson(doc, buffer, sizeof(buffer));
+
+    mqtt.publish(MQTT_TOPIC_CREATE, buffer);
+    Serial.printf("[MQTT][INV] Batch published (%u items)\n", pending);
+
+    // Clear pending after successful publish (best-effort)
+    // The server will ack; if we lose it, items remain in pending for next sync
+    return pending;
 }

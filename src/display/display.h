@@ -32,4 +32,10 @@ lv_disp_t* display_get_disp(void);
  */
 lgfx::LGFX_Device& display_get_tft(void);
 
+/**
+ * @brief Register an SPI mutex to serialize LCD access between LVGL flush
+ *        and direct LovyanGFX callers (e.g. scan_preview render task).
+ */
+void display_set_spi_mutex(SemaphoreHandle_t mutex);
+
 #endif /* DISPLAY_H */

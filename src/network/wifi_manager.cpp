@@ -6,6 +6,7 @@
 #include "wifi_manager.h"
 #include <WiFi.h>
 #include "config/config.h"
+#include "storage/scan_log.h"
 
 void wifi_manager_init(void) {
     WiFi.mode(WIFI_STA);
@@ -24,8 +25,10 @@ void wifi_manager_init(void) {
     }
 
     Serial.printf("\n[WIFI] Connected! IP: %s, RSSI: %d dBm\n",
-                  WiFi.localIP().toString().c_str(),
-                  WiFi.RSSI());
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+
+    // Sync any pending offline scans now that WiFi is up
+    scan_log_sync_pending();
 }
 
 bool wifi_is_connected(void) {
@@ -57,5 +60,8 @@ void wifi_reconnect(void) {
             delay(500);
         }
         Serial.printf("[WIFI] Reconnected, IP: %s\n", WiFi.localIP().toString().c_str());
+
+        // Sync any pending offline scans now that WiFi is back
+        scan_log_sync_pending();
     }
 }

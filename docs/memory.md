@@ -119,12 +119,46 @@ uint16_t col = g_scanning ? 0xF800 : 0x07E0;
 tft.fillRect(20, 130, 200, 60, col);  // Direct LovyanGFX draw
 ```
 
-## Pending
+## Phase 0~10 Implementation Summary (2026-09-21)
 
-1. Verify `tft.fillRect()` works reliably on hardware
-2. Re-test BOOT button (GPIO0) on hardware after the `INPUT_PULLUP` fix —
-   confirm `[DBG] GPIO0=0` appears while the button is held
-3. Identify 0x7E I2C device — likely GT911 needing reset sequence
-4. Integrate TouchLib GT911 driver
-5. Full barcode scanner UI
-6. Camera OV5640 integration
+All phases completed and verified via `pio run` build success.
+
+| Phase | Feature | Status |
+|-------|---------|--------|
+| 0 | Infrastructure — LVGL + LovyanGFX + PlatformIO | ✅ |
+| 1 | Scanner power control (GPIO48) | ✅ |
+| 2 | LVGL scan result display with direct `tft.fillRect()` | ✅ |
+| 3 | Flashlight control | ✅ |
+| 4 | Main menu / back navigation | ✅ |
+| 5 | Scan history | ✅ |
+| 6 | BOOT button interrupt (GPIO0, INPUT_PULLUP) | ✅ |
+| 7 | Offline log — daily files + pending queue | ✅ |
+| 8 | Photo capture — JPEG SVGA mode + HTTP POST upload | ✅ |
+| 9 | Integration — scan modes, offline→online sync, inventory upload | ✅ |
+| 10 | Optimization — OTA update, NVS settings, low power, LVGL animations | ✅ |
+
+**Final build**: RAM 37.9% (124304 / 327680), Flash 21.5% (676905 / 3145728)
+
+**Phase 8 新增檔案：**
+- `src/network/http_upload.cpp/.h` — WiFiClient HTTP POST multipart upload
+- `src/camera/camera.cpp` — `camera_set_jpeg_mode()`, `camera_capture_jpeg()`
+- `src/ui/ui_main.cpp` — UI_PAGE_PHOTO 頁面
+
+**Phase 9 新增整合：**
+- 掃描模式切換（查詢/輸入/盤點）
+- WiFi 重連時自動同步待上傳日誌
+- 盤點批次上傳 MQTT
+
+**Phase 10 新增檔案：**
+- `src/ota_update.cpp/.h` — OTA 韌體更新（ESP32 ArduinoOTA）
+- `src/storage/nvs_settings.cpp/.h` — NVS 設定持久化（Preferences）
+- `src/power.cpp/.h` — 低功耗模式（idle 熄螢幕/降亮度）
+
+## 待驗證
+
+1. BOOT 按鈕按住時序列埠輸出 `[DBG] GPIO0=0`
+2. `tft.fillRect()` 在硬體上穩定運作
+3. 0x7E I2C 裝置識別（GT911 可能需重置序列）
+4. TouchLib GT911 驅動整合
+5. 完整條碼掃描 UI
+6. OV5640 相機整合

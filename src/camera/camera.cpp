@@ -35,9 +35,9 @@ bool camera_init(void) {
     config.frame_size = CAM_FRAME_SIZE;         // QVGA 320x240
     config.pixel_format = PIXFORMAT_GRAYSCALE;  // Grayscale for barcode scanning
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-    config.fb_location = CAMERA_FB_IN_PSRAM;
+    config.fb_location = CAMERA_FB_IN_DRAM;   // No PSRAM on this board
     config.jpeg_quality = CAM_JPEG_QUALITY;
-    config.fb_count = CAM_FB_COUNT;
+    config.fb_count = 1;                       // Single buffer saves DRAM
 
     // Initialize camera
     esp_err_t err = esp_camera_init(&config);
@@ -85,4 +85,33 @@ void camera_return_fb(camera_fb_t* fb) {
 
 void camera_deinit(void) {
     esp_camera_deinit();
+}
+
+void camera_set_jpeg_mode(bool enable) {
+    sensor_t* s = esp_camera_sensor_get();
+    if (!s) return;
+
+    if (enable) {
+        // Switch to JPEG mode: SVGA 800x600
+        s->set_framesize(s, FRAMESIZE_SVGA);
+        s->set_pixformat(s, PIXFORMAT_JPEG);
+        Serial.println("[CAM] JPEG mode: FRAMESIZE_SVGA");
+    } else {
+        // Switch back to grayscale QVGA
+        s->set_framesize(s, FRAMESIZE_QVGA);
+        s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
+        Serial.println("[CAM] Grayscale mode: FRAMESIZE_QVGA");
+    }
+}
+
+camera_fb_t* camera_capture_jpeg(void) {
+    // Ensure JPEG mode is set
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) {
+        if (s->id.PID == OV5640_PID) {
+            s->set_vflip(s, 1);
+            s->set_hmirror(s, 0);
+        }
+    }
+    return esp_camera_fb_get();
 }

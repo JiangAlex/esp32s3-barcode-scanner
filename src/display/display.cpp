@@ -8,6 +8,7 @@
 #include "config/pinout.h"
 #include "config/config.h"
 #include "input/touch.h"
+#include "scan_preview.h"  // for s_spi_mutex extern declaration
 
 // ─── LovyanGFX Panel Configuration ─────────────────────────────────────────
 
@@ -89,6 +90,11 @@ static lv_color_t* buf2 = nullptr;
 // ─── LVGL flush callback ────────────────────────────────────────────────────
 
 static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    if (s_spi_mutex && xSemaphoreTake(s_spi_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
+
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
 
@@ -96,6 +102,8 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
     tft.setAddrWindow(area->x1, area->y1, w, h);
     tft.writePixels((uint16_t*)&color_p->full, w * h);
     tft.endWrite();
+
+    if (s_spi_mutex) xSemaphoreGive(s_spi_mutex);
 
     lv_disp_flush_ready(drv);
 }
@@ -159,6 +167,10 @@ void display_init(void) {
         indev_drv.read_cb = lvgl_touch_cb;
         lv_indev_drv_register(&indev_drv);
     }
+}
+
+void display_set_spi_mutex(SemaphoreHandle_t mutex) {
+    s_spi_mutex = mutex;
 }
 
 void display_set_brightness(uint8_t brightness) {
