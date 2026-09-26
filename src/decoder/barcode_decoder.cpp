@@ -289,8 +289,26 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
         int rw = (QW * 7) / 10, rh = (QH * 7) / 10;
         int rx = (QW - rw) / 2, ry = (QH - rh) / 2;
         int base = otsu_threshold_roi(s_luma, QW, QH, rx, ry, rw, rh);
+
+        // Diagnostic: luma contrast over the ROI. Low spread ⇒ blurred/low-
+        // contrast image (nothing to decode); wide spread ⇒ sharp enough.
+        {
+            uint8_t lo = 255, hi = 0;
+            for (int y = ry; y < ry + rh; y += 4) {
+                const uint8_t* row = s_luma + y * QW;
+                for (int x = rx; x < rx + rw; x += 4) {
+                    uint8_t v = row[x];
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+            }
+            Serial.printf("[DECODE] luma ROI min=%u max=%u spread=%u otsu=%d\n",
+                          lo, hi, (unsigned)(hi - lo), base);
+        }
+
         const int offs[] = {0, -20, +20, -40, +40};
         uint32_t qr_start = millis();
+        int max_qr_count = 0;
         for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++) {
             int th = base + offs[k];
             if (th < 1) th = 1;
@@ -308,9 +326,11 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
                 Serial.printf("[DECODE] QR (hi-res→QVGA th=%d): %s\n", th, content.c_str());
                 return result;
             }
+            if (qr_count > max_qr_count) max_qr_count = qr_count;
             if (k == 0 && qr_count == 0) break;
             if ((millis() - qr_start) >= 350) break;
         }
+        Serial.printf("[DECODE] QR: no decode (max capstone candidates=%d)\n", max_qr_count);
     }
 
     // ── 1D at full resolution ── (fine product-label bars need the pixels)
