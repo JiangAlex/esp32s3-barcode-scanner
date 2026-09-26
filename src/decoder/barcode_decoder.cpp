@@ -172,6 +172,15 @@ static DecodeResult decode_core(const uint8_t* luma, int w, int h) {
         int base = otsu_threshold_roi(luma, w, h, rx, ry, rw, rh);
         const int offs[] = {0, -20, +20, -40, +40};
 
+        // Bound total QR effort by a time budget rather than a fixed pass count.
+        // quirc_end is cheap with no candidates but runs a costly perspective
+        // fit once candidates exist; on-device a marginal QR made all 5
+        // thresholds fit → ~1200 ms/frame. A budget lets us try several
+        // thresholds (preserving decode success) while capping worst-case frame
+        // time so preview fps stays responsive.
+        uint32_t qr_start_ms = millis();
+        const uint32_t QR_BUDGET_MS = 350;
+
         for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++) {
             int th = base + offs[k];
             if (th < 1) th = 1;
@@ -199,6 +208,9 @@ static DecodeResult decode_core(const uint8_t* luma, int w, int h) {
             // would only help a present-but-marginal QR). This is the key guard
             // against multi-threshold identify starving the CPU on busy scenes.
             if (k == 0 && qr_count == 0) break;
+
+            // Stop once the QR time budget is exhausted; the next frame retries.
+            if ((millis() - qr_start_ms) >= QR_BUDGET_MS) break;
         }
     }
 
