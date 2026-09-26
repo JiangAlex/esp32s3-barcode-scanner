@@ -117,11 +117,10 @@ static bool decode_current_frame(camera_fb_t* fb) {
     DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
     if (res.success && res.content.length() > 0 && s_decode_cb) {
         s_decode_cb(res.type_name.c_str(), res.content.c_str());
-        Serial.println("[PREVIEW] decode: DECODED");
+        Serial.println("[PREVIEW] scan: DECODED");
         return true;
     }
-    Serial.println("[PREVIEW] decode: no code");
-    return false;
+    return false;   // per-frame misses are silent; the window logs the outcome
 }
 
 // ─── Core 0: Frame Capture ────────────────────────────────────────────────────
@@ -183,18 +182,34 @@ static void capture_task(void* param) {
             }
         }
 
-        // ── Barcode decode on the full-resolution frame ──
-        // Runs on Core 0. barcode_decode() converts RGB565 → luma internally and
-        // ── Decode is user-triggered, not per-frame ──
-        // Live SVGA frames are downsampled for preview (above). A short press on
-        // the SCAN page sets s_hires_requested; we then decode the CURRENT SVGA
-        // frame directly (QR downsampled to QVGA, 1D at full 800x600). No sensor
-        // mode switch — the camera is always at SVGA.
-        if (s_decode_cb && s_hires_requested &&
+        // ── Decode is user-triggered; try several frames until one succeeds ──
+        // A short press starts an attempt window. Because the lens is fixed-
+        // focus, individual frames vary in sharpness with hand motion — most
+        // yield no QR finder patterns, but within a few frames one is usually
+        // sharp enough. So we decode consecutive frames until success or the
+        // window (max frames / max time) expires. Preview keeps updating between
+        // attempts since each loop still runs the downscale above.
+        static int      s_attempts_left = 0;
+        static uint32_t s_attempt_deadline = 0;
+        const int       HIRES_MAX_ATTEMPTS = 8;
+        const uint32_t  HIRES_MAX_MS = 2000;
+
+        if (s_hires_requested) {
+            s_hires_requested = false;
+            s_attempts_left = HIRES_MAX_ATTEMPTS;
+            s_attempt_deadline = millis() + HIRES_MAX_MS;
+            Serial.println("[PREVIEW] scan: starting multi-frame attempt");
+        }
+
+        if (s_decode_cb && s_attempts_left > 0 &&
             fb->format == PIXFORMAT_RGB565 &&
             fb->width == SRC_W && fb->height == SRC_H) {
-            s_hires_requested = false;
-            decode_current_frame(fb);
+            s_attempts_left--;
+            bool ok = decode_current_frame(fb);
+            if (ok || millis() >= s_attempt_deadline) {
+                if (!ok) Serial.println("[PREVIEW] scan: window expired, no code");
+                s_attempts_left = 0;
+            }
         }
 
         esp_camera_fb_return(fb);
