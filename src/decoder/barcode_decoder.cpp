@@ -267,21 +267,73 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
     DecodeResult result = {false, BARCODE_UNKNOWN, "", ""};
     if (!luma || w <= 0 || h <= 0) return result;
 
-    // Resize the quirc buffer to the hi-res frame for QR geometry, decode, then
-    // restore to QVGA so the live QVGA path keeps working.
-    bool resized = false;
-    if (qr_decoder && (w != 320 || h != 240)) {
-        if (quirc_resize(qr_decoder, w, h) >= 0) resized = true;
-        else Serial.println("[DECODE] hi-res quirc_resize failed; QR skipped");
-    }
-
-    result = decode_core(luma, w, h);
-
-    if (resized) {
-        if (quirc_resize(qr_decoder, 320, 240) < 0) {
-            Serial.println("[DECODE] WARN: failed to restore quirc to QVGA");
+    // ── QR on a QVGA-downsampled copy ──
+    // quirc's identify cost scales with pixel count; running it at SVGA can take
+    // seconds and trip the task watchdog. QR modules are coarse — QVGA
+    // resolution is plenty — so downsample the hi-res frame to 320x240 (nearest
+    // neighbor) into s_luma and run QR there. quirc stays sized at QVGA.
+    if (qr_decoder && s_luma) {
+        const int QW = 320, QH = 240;
+        // Nearest-neighbor downscale w×h → QW×QH.
+        for (int dy = 0; dy < QH; dy++) {
+            int sy = (int)((long)dy * h / QH);
+            const uint8_t* srow = luma + (long)sy * w;
+            uint8_t* drow = s_luma + dy * QW;
+            for (int dx = 0; dx < QW; dx++) {
+                drow[dx] = srow[(int)((long)dx * w / QW)];
+            }
+        }
+        // QR-only pass at QVGA (decode_core also tries 1D on this small buffer,
+        // which is cheap and harmless; but we want 1D at full res, so run a
+        // dedicated QR helper here).
+        int rw = (QW * 7) / 10, rh = (QH * 7) / 10;
+        int rx = (QW - rw) / 2, ry = (QH - rh) / 2;
+        int base = otsu_threshold_roi(s_luma, QW, QH, rx, ry, rw, rh);
+        const int offs[] = {0, -20, +20, -40, +40};
+        uint32_t qr_start = millis();
+        for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++) {
+            int th = base + offs[k];
+            if (th < 1) th = 1;
+            if (th > 254) th = 254;
+            esp_task_wdt_reset();
+            vTaskDelay(1);
+            String content;
+            int qr_count = 0;
+            if (qr_try_threshold(s_luma, QW, QH, th, &content, &qr_count)) {
+                result.success = true;
+                result.type = BARCODE_QR_CODE;
+                result.content = content;
+                result.type_name = "QR Code";
+                beep_success();
+                Serial.printf("[DECODE] QR (hi-res→QVGA th=%d): %s\n", th, content.c_str());
+                return result;
+            }
+            if (k == 0 && qr_count == 0) break;
+            if ((millis() - qr_start) >= 350) break;
         }
     }
+
+    // ── 1D at full resolution ── (fine product-label bars need the pixels)
+    {
+        bc1d_result_t r1d;
+        int n_lines = (h >= 480) ? 25 : 15;
+        if (bc1d_decode_image(luma, w, h, w, n_lines, &r1d)) {
+            result.success = true;
+            result.content = String(r1d.text);
+            result.type_name = bc1d_type_name(r1d.type);
+            switch (r1d.type) {
+                case BC1D_EAN_13:   result.type = BARCODE_EAN_13; break;
+                case BC1D_UPC_A:    result.type = BARCODE_UPC_A;  break;
+                case BC1D_CODE_128: result.type = BARCODE_CODE_128; break;
+                default:            result.type = BARCODE_UNKNOWN; break;
+            }
+            beep_success();
+            Serial.printf("[DECODE] 1D %s (%dx%d): %s\n",
+                          result.type_name.c_str(), w, h, result.content.c_str());
+            return result;
+        }
+    }
+
     return result;
 }
 

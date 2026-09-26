@@ -127,13 +127,21 @@ static bool try_hires_decode(void) {
 
     bool decoded = false;
     camera_fb_t* fb = esp_camera_fb_get();
-    if (fb && fb->format == PIXFORMAT_RGB565 &&
-        fb->width == HIRES_W && fb->height == HIRES_H) {
-        rgb565_to_luma_local((const uint16_t*)fb->buf, s_hires_luma, HIRES_W * HIRES_H);
-        DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
-        if (res.success && res.content.length() > 0 && s_decode_cb) {
-            s_decode_cb(res.type_name.c_str(), res.content.c_str());
-            decoded = true;
+    if (!fb) {
+        Serial.println("[PREVIEW] hi-res: fb_get returned NULL");
+    } else {
+        Serial.printf("[PREVIEW] hi-res fb: %ux%u fmt=%u len=%u\n",
+                      fb->width, fb->height, fb->format, fb->len);
+        if (fb->format == PIXFORMAT_RGB565 &&
+            fb->width == HIRES_W && fb->height == HIRES_H) {
+            rgb565_to_luma_local((const uint16_t*)fb->buf, s_hires_luma, HIRES_W * HIRES_H);
+            DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
+            if (res.success && res.content.length() > 0 && s_decode_cb) {
+                s_decode_cb(res.type_name.c_str(), res.content.c_str());
+                decoded = true;
+            }
+        } else {
+            Serial.println("[PREVIEW] hi-res: frame not SVGA/RGB565 — skipped");
         }
     }
     if (fb) esp_camera_fb_return(fb);
