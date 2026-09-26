@@ -14,6 +14,7 @@
 #include <Arduino.h>
 #include "config/pinout.h"
 #include "config/config.h"
+#include <esp_task_wdt.h>
 
 // ─── Quirc QR Code Decoder ──────────────────────────────────────────────────
 // quirc is included via the esp32-camera library or can be added separately
@@ -90,15 +91,18 @@ static int otsu_threshold_roi(const uint8_t* luma, int w, int h,
 
 // Binarize `luma` (w*h) into the quirc image buffer at threshold `th`, then run
 // identify + decode. Returns the decoded payload via out params on success.
+// `*out_count` receives the number of QR capstone groups quirc identified, so
+// the caller can avoid re-thresholding a scene that has no QR at all.
 static bool qr_try_threshold(const uint8_t* luma, int w, int h, int th,
-                             String* content) {
+                             String* content, int* out_count) {
     uint8_t* image = quirc_begin(qr_decoder, nullptr, nullptr);
-    if (!image) return false;
+    if (!image) { if (out_count) *out_count = 0; return false; }
     int npx = w * h;
     for (int i = 0; i < npx; i++) image[i] = (luma[i] > th) ? 255 : 0;
     quirc_end(qr_decoder);
 
     int count = quirc_count(qr_decoder);
+    if (out_count) *out_count = count;
     for (int i = 0; i < count; i++) {
         struct quirc_code code;
         struct quirc_data data;
@@ -157,17 +161,30 @@ static DecodeResult decode_core(const uint8_t* luma, int w, int h) {
     DecodeResult result = {false, BARCODE_UNKNOWN, "", ""};
 
     // ── QR: ROI Otsu threshold + bracketed retries ──
-    if (qr_decoder) {
+    // QR only at QVGA. quirc_end (identify) cost scales with pixel count; at
+    // SVGA it can run for seconds and starve IDLE0 → task watchdog abort. QR
+    // already decodes reliably at QVGA, and the hi-res path exists for fine 1D
+    // barcodes (which the fast line-scan handles), so skip QR when w*h is large.
+    bool qr_allowed = (w * h <= 320 * 240);
+    if (qr_decoder && qr_allowed) {
         int rw = (w * 7) / 10, rh = (h * 7) / 10;
         int rx = (w - rw) / 2, ry = (h - rh) / 2;
         int base = otsu_threshold_roi(luma, w, h, rx, ry, rw, rh);
         const int offs[] = {0, -20, +20, -40, +40};
+
         for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++) {
             int th = base + offs[k];
             if (th < 1) th = 1;
             if (th > 254) th = 254;
+
+            // Feed the watchdog and yield before each identify pass so a busy
+            // scene (many finder-like candidates) can't starve IDLE0.
+            esp_task_wdt_reset();
+            vTaskDelay(1);
+
             String content;
-            if (qr_try_threshold(luma, w, h, th, &content)) {
+            int qr_count = 0;
+            if (qr_try_threshold(luma, w, h, th, &content, &qr_count)) {
                 result.success = true;
                 result.type = BARCODE_QR_CODE;
                 result.content = content;
@@ -176,6 +193,12 @@ static DecodeResult decode_core(const uint8_t* luma, int w, int h) {
                 Serial.printf("[DECODE] QR (%dx%d th=%d): %s\n", w, h, th, content.c_str());
                 return result;
             }
+
+            // If the base threshold identified no QR candidates at all, this
+            // frame has no QR — skip the remaining bracketed thresholds (which
+            // would only help a present-but-marginal QR). This is the key guard
+            // against multi-threshold identify starving the CPU on busy scenes.
+            if (k == 0 && qr_count == 0) break;
         }
     }
 
