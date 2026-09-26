@@ -549,6 +549,11 @@ void ui_nav_event(nav_event_t ev) {
                 if (g_scan_mode == SCAN_MODE_INVENTORY) {
                     // Jump to the inventory page to review / upload the batch.
                     show_page(UI_PAGE_INVENTORY);
+                } else {
+                    // QUERY / INPUT: trigger a one-shot hi-res (SVGA) decode for
+                    // small/fine 1D product-label barcodes that QVGA can't
+                    // resolve. (Auto-triggering was removed — it dragged fps.)
+                    scan_preview_request_hires();
                 }
             }
             break;

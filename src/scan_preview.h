@@ -31,6 +31,12 @@ bool scan_preview_is_running(void);
 typedef void (*scan_decode_cb_t)(const char* type_name, const char* content);
 void scan_preview_set_decode_cb(scan_decode_cb_t cb);
 
+// Request a one-shot hi-res (SVGA 800x600) decode on the next capture-task
+// iteration that has no live-QVGA decode. User-triggered (long-press CONFIRM on
+// the SCAN page in QUERY/INPUT mode) — helps small/fine 1D product-label
+// barcodes that QVGA can't resolve. Safe to call from any task.
+void scan_preview_request_hires(void);
+
 // SPI mutex for serializing LCD access between LVGL flush and scan_preview render
 // Owned by scan_preview; register with display via display_set_spi_mutex()
 extern SemaphoreHandle_t s_spi_mutex;

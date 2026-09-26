@@ -31,15 +31,12 @@
 #define SRC_H  240
 
 // ── Hi-res single-shot (SVGA) pipeline ──
-// When the live QVGA path fails to decode for a while, switch to SVGA 800x600,
-// grab one frame, run the full decoder at high resolution (better for small/
-// fine product-label barcodes), then switch back. Trigger after this many
-// consecutive QVGA frames without a decode.
+// User-triggered (long-press CONFIRM on SCAN page in QUERY/INPUT mode): switch
+// to SVGA 800x600, grab one frame, run the full decoder at high resolution
+// (better for small/fine product-label barcodes), then switch back.
 #define HIRES_W            800
 #define HIRES_H            600
 #define HIRES_LUMA_PX      (HIRES_W * HIRES_H)
-#define HIRES_TRIGGER_FRAMES 40    // ~ several seconds at preview fps
-#define HIRES_COOLDOWN_MS  4000    // min gap between hi-res attempts
 
 // Fixed-point (16.16) sampling steps for non-integer downscale.
 // QVGA 320x240 → VF 200x150 is a 1.6x reduction on both axes.
@@ -73,6 +70,7 @@ static bool s_decoder_ready = false;
 // SVGA luma buffer (PSRAM). Allocated lazily on the first hi-res attempt.
 static uint8_t* s_hires_luma = nullptr;
 static bool     s_af_available = false;   // set by scan_preview_start from probe
+static volatile bool s_hires_requested = false;  // set by scan_preview_request_hires()
 
 // Convert 8-bit grayscale to RGB565
 static inline uint16_t gray_to_rgb565(uint8_t g) {
@@ -217,23 +215,11 @@ static void capture_task(void* param) {
 
             static uint32_t s_last_decode_ms = 0;
             static char     s_last_content[128] = {0};
-            static uint32_t s_miss_frames = 0;
-            static uint32_t s_last_hires_ms = 0;
 
             uint32_t now = millis();
-            uint32_t t0 = micros();
             DecodeResult res = barcode_decode(fb);
-            uint32_t dt = micros() - t0;
-            static uint32_t s_dbg_frames = 0, s_dbg_us_sum = 0;
-            s_dbg_frames++; s_dbg_us_sum += dt;
-            if (s_dbg_frames >= 20) {
-                Serial.printf("[DECODE] avg QVGA decode %.1f ms/frame\n",
-                              (s_dbg_us_sum / 1000.0f) / s_dbg_frames);
-                s_dbg_frames = 0; s_dbg_us_sum = 0;
-            }
 
             if (res.success && res.content.length() > 0) {
-                s_miss_frames = 0;
                 bool same_as_last = (strncmp(s_last_content, res.content.c_str(),
                                              sizeof(s_last_content) - 1) == 0);
                 bool cooled_down  = (now - s_last_decode_ms) >= SCAN_COOLDOWN_MS;
@@ -246,21 +232,15 @@ static void capture_task(void* param) {
                     s_last_content[sizeof(s_last_content) - 1] = '\0';
                     s_decode_cb(res.type_name.c_str(), res.content.c_str());
                 }
-            } else {
-                // No decode. After enough consecutive misses, escalate to a
-                // hi-res SVGA single-shot (small/fine product-label barcodes
-                // often need the extra resolution). Rate-limited by cooldown.
-                s_miss_frames++;
-                if (s_miss_frames >= HIRES_TRIGGER_FRAMES &&
-                    (now - s_last_hires_ms) >= HIRES_COOLDOWN_MS) {
-                    s_miss_frames = 0;
-                    s_last_hires_ms = now;
-                    // fb is returned below; release it before switching modes.
-                    esp_camera_fb_return(fb);
-                    fb = nullptr;
-                    try_hires_decode();
-                    s_last_hires_ms = millis();   // account for time spent
-                }
+            } else if (s_hires_requested) {
+                // Hi-res SVGA single-shot is user-triggered (long-press CONFIRM
+                // on the SCAN page in QUERY/INPUT mode). Auto-triggering on a
+                // miss counter was removed — it fired every few seconds while
+                // idle and dragged preview fps from 7.5 down to ~3.
+                s_hires_requested = false;
+                esp_camera_fb_return(fb);   // release before switching modes
+                fb = nullptr;
+                try_hires_decode();
             }
         }
 
@@ -468,4 +448,8 @@ bool scan_preview_is_running(void) {
 
 void scan_preview_set_decode_cb(scan_decode_cb_t cb) {
     s_decode_cb = cb;
+}
+
+void scan_preview_request_hires(void) {
+    s_hires_requested = true;
 }
