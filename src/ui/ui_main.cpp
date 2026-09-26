@@ -542,19 +542,13 @@ void ui_nav_event(nav_event_t ev) {
 
         case UI_PAGE_SCAN: {
             if (ev == NAV_NEXT) {
-                // Short press cycles the scan mode (QUERY → INPUT → INVENTORY).
-                ui_cycle_scan_mode();
+                // Short press = trigger one high-resolution (SVGA) scan. The
+                // capture task grabs an 800x600 frame and decodes QR + 1D.
+                // Live preview stays QVGA/fast; decoding only happens here.
+                scan_preview_request_hires();
             } else if (ev == NAV_CONFIRM) {
-                // Long press confirms the current mode's action.
-                if (g_scan_mode == SCAN_MODE_INVENTORY) {
-                    // Jump to the inventory page to review / upload the batch.
-                    show_page(UI_PAGE_INVENTORY);
-                } else {
-                    // QUERY / INPUT: trigger a one-shot hi-res (SVGA) decode for
-                    // small/fine 1D product-label barcodes that QVGA can't
-                    // resolve. (Auto-triggering was removed — it dragged fps.)
-                    scan_preview_request_hires();
-                }
+                // Long press = cycle scan mode (QUERY → INPUT → INVENTORY).
+                ui_cycle_scan_mode();
             }
             break;
         }

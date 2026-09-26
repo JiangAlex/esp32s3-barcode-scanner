@@ -208,40 +208,19 @@ static void capture_task(void* param) {
 
         // ── Barcode decode on the full-resolution frame ──
         // Runs on Core 0. barcode_decode() converts RGB565 → luma internally and
-        // feeds quirc the full frame. Debounced by SCAN_COOLDOWN_MS.
-        if (s_decode_cb &&
+        // ── Decode is user-triggered, not per-frame ──
+        // Live QVGA frames are preview-only (keeps fps high). A short press on
+        // the SCAN page sets s_hires_requested; we then grab one SVGA 800x600
+        // frame and run the full decoder (QR + 1D) at high resolution — enough
+        // to resolve fine product-label barcodes. The camera's native
+        // resolution (not the QVGA preview) is what matters for decoding.
+        if (s_decode_cb && s_hires_requested &&
             fb->format == PIXFORMAT_RGB565 &&
             fb->width == 320 && fb->height == 240) {
-
-            static uint32_t s_last_decode_ms = 0;
-            static char     s_last_content[128] = {0};
-
-            uint32_t now = millis();
-            DecodeResult res = barcode_decode(fb);
-
-            if (res.success && res.content.length() > 0) {
-                bool same_as_last = (strncmp(s_last_content, res.content.c_str(),
-                                             sizeof(s_last_content) - 1) == 0);
-                bool cooled_down  = (now - s_last_decode_ms) >= SCAN_COOLDOWN_MS;
-
-                // Fire if it's a different code, or the same code after cooldown.
-                if (!same_as_last || cooled_down) {
-                    s_last_decode_ms = now;
-                    strncpy(s_last_content, res.content.c_str(),
-                            sizeof(s_last_content) - 1);
-                    s_last_content[sizeof(s_last_content) - 1] = '\0';
-                    s_decode_cb(res.type_name.c_str(), res.content.c_str());
-                }
-            } else if (s_hires_requested) {
-                // Hi-res SVGA single-shot is user-triggered (long-press CONFIRM
-                // on the SCAN page in QUERY/INPUT mode). Auto-triggering on a
-                // miss counter was removed — it fired every few seconds while
-                // idle and dragged preview fps from 7.5 down to ~3.
-                s_hires_requested = false;
-                esp_camera_fb_return(fb);   // release before switching modes
-                fb = nullptr;
-                try_hires_decode();
-            }
+            s_hires_requested = false;
+            esp_camera_fb_return(fb);   // release before switching modes
+            fb = nullptr;
+            try_hires_decode();
         }
 
         if (fb) esp_camera_fb_return(fb);
