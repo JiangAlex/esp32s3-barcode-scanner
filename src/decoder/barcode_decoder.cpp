@@ -274,18 +274,34 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
     // neighbor) into s_luma and run QR there. quirc stays sized at QVGA.
     if (qr_decoder && s_luma) {
         const int QW = 320, QH = 240;
-        // Nearest-neighbor downscale w×h → QW×QH.
+        // Box-average downscale w×h → QW×QH. Averaging each source cell (vs
+        // nearest-neighbor point sampling) low-pass filters the image, which
+        // suppresses moiré from photographing a phone/monitor screen and
+        // smooths mild defocus — both improve quirc finder-pattern detection.
+        // Cell size in source pixels per destination pixel:
+        int cw = w / QW; if (cw < 1) cw = 1;    // ~2 for 800→320
+        int ch = h / QH; if (ch < 1) ch = 1;    // ~2 for 600→240
         for (int dy = 0; dy < QH; dy++) {
-            int sy = (int)((long)dy * h / QH);
-            const uint8_t* srow = luma + (long)sy * w;
+            int sy0 = (int)((long)dy * h / QH);
             uint8_t* drow = s_luma + dy * QW;
             for (int dx = 0; dx < QW; dx++) {
-                drow[dx] = srow[(int)((long)dx * w / QW)];
+                int sx0 = (int)((long)dx * w / QW);
+                uint32_t sum = 0;
+                int n = 0;
+                for (int yy = 0; yy < ch; yy++) {
+                    int sy = sy0 + yy;
+                    if (sy >= h) break;
+                    const uint8_t* srow = luma + (long)sy * w;
+                    for (int xx = 0; xx < cw; xx++) {
+                        int sx = sx0 + xx;
+                        if (sx >= w) break;
+                        sum += srow[sx];
+                        n++;
+                    }
+                }
+                drow[dx] = (uint8_t)(n ? (sum / n) : 0);
             }
         }
-        // QR-only pass at QVGA (decode_core also tries 1D on this small buffer,
-        // which is cheap and harmless; but we want 1D at full res, so run a
-        // dedicated QR helper here).
         int rw = (QW * 7) / 10, rh = (QH * 7) / 10;
         int rx = (QW - rw) / 2, ry = (QH - rh) / 2;
         int base = otsu_threshold_roi(s_luma, QW, QH, rx, ry, rw, rh);
