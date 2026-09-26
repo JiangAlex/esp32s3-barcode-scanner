@@ -221,7 +221,16 @@ static void capture_task(void* param) {
             static uint32_t s_last_hires_ms = 0;
 
             uint32_t now = millis();
+            uint32_t t0 = micros();
             DecodeResult res = barcode_decode(fb);
+            uint32_t dt = micros() - t0;
+            static uint32_t s_dbg_frames = 0, s_dbg_us_sum = 0;
+            s_dbg_frames++; s_dbg_us_sum += dt;
+            if (s_dbg_frames >= 20) {
+                Serial.printf("[DECODE] avg QVGA decode %.1f ms/frame\n",
+                              (s_dbg_us_sum / 1000.0f) / s_dbg_frames);
+                s_dbg_frames = 0; s_dbg_us_sum = 0;
+            }
 
             if (res.success && res.content.length() > 0) {
                 s_miss_frames = 0;
