@@ -245,17 +245,6 @@ bool camera_af_trigger_oneshot(void) {
 bool camera_set_rgb565_svga(void) {
     sensor_t* s = esp_camera_sensor_get();
     if (!s) return false;
-    if (s->set_pixformat(s, PIXFORMAT_RGB565) != 0) return false;
     if (s->set_framesize(s, FRAMESIZE_SVGA) != 0) return false;
-    Serial.println("[CAM] switched to SVGA RGB565 (hi-res)");
-    return true;
-}
-
-bool camera_set_rgb565_qvga(void) {
-    sensor_t* s = esp_camera_sensor_get();
-    if (!s) return false;
-    if (s->set_pixformat(s, PIXFORMAT_RGB565) != 0) return false;
-    if (s->set_framesize(s, FRAMESIZE_QVGA) != 0) return false;
-    Serial.println("[CAM] switched to QVGA RGB565 (preview)");
     return true;
 }

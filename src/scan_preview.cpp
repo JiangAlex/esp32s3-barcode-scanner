@@ -26,20 +26,18 @@
 #define VF_X   ((240 - VF_W) / 2)
 #define VF_Y   ((320 - VF_H) / 2)
 
-// Source camera frame (QVGA)
-#define SRC_W  320
-#define SRC_H  240
+// Source camera frame — always-on SVGA (see config.h CAM_FRAME_SIZE). Decoding
+// uses this full resolution; the preview is downsampled from it.
+#define SRC_W  800
+#define SRC_H  600
 
-// ── Hi-res single-shot (SVGA) pipeline ──
-// User-triggered (long-press CONFIRM on SCAN page in QUERY/INPUT mode): switch
-// to SVGA 800x600, grab one frame, run the full decoder at high resolution
-// (better for small/fine product-label barcodes), then switch back.
+// Hi-res decode buffer size (== source frame). Kept for the luma buffer alloc.
 #define HIRES_W            800
 #define HIRES_H            600
 #define HIRES_LUMA_PX      (HIRES_W * HIRES_H)
 
 // Fixed-point (16.16) sampling steps for non-integer downscale.
-// QVGA 320x240 → VF 200x150 is a 1.6x reduction on both axes.
+// SVGA 800x600 → VF 200x150 is a 4x reduction on both axes.
 #define STEP_X  ((SRC_W << 16) / VF_W)   // src px per dst px, 16.16
 #define STEP_Y  ((SRC_H << 16) / VF_H)
 
@@ -94,65 +92,36 @@ static void rgb565_to_luma_local(const uint16_t* src, uint8_t* dst, int npx) {
     }
 }
 
-// Perform one hi-res (SVGA) capture + decode. Switches the sensor to SVGA,
-// optionally triggers autofocus, grabs a settled frame, converts to luma, runs
-// the full decoder at 800x600, then switches back to QVGA. Returns true if a
-// code was decoded (result delivered via s_decode_cb). Runs on Core 0.
-static bool try_hires_decode(void) {
+// Decode the current SVGA frame (already the always-on capture size). No mode
+// switching — the camera is initialized at SVGA, so `fb` is 800x600 RGB565.
+// Converts to luma and runs the full decoder (QR downsampled + 1D full-res).
+// Returns true if a code was decoded (delivered via s_decode_cb). Core 0.
+static bool decode_current_frame(camera_fb_t* fb) {
     if (!s_hires_luma) {
         s_hires_luma = (uint8_t*)heap_caps_malloc(HIRES_LUMA_PX, MALLOC_CAP_SPIRAM);
         if (!s_hires_luma) {
-            Serial.println("[PREVIEW] hi-res luma alloc failed; skipping SVGA path");
+            Serial.println("[PREVIEW] decode: luma alloc failed");
             return false;
         }
     }
 
-    Serial.println("[PREVIEW] hi-res: switching to SVGA...");
-    if (!camera_set_rgb565_svga()) {
-        camera_set_rgb565_qvga();
+    if (!fb || fb->format != PIXFORMAT_RGB565 ||
+        fb->width != HIRES_W || fb->height != HIRES_H) {
+        Serial.printf("[PREVIEW] decode: unexpected frame %ux%u fmt=%u len=%u\n",
+                      fb ? fb->width : 0, fb ? fb->height : 0,
+                      fb ? fb->format : 0, fb ? fb->len : 0);
         return false;
     }
 
-    // Discard a few frames so the sensor's AE/AWB settle at the new resolution.
-    for (int i = 0; i < 3; i++) {
-        camera_fb_t* w = esp_camera_fb_get();
-        if (w) esp_camera_fb_return(w);
+    rgb565_to_luma_local((const uint16_t*)fb->buf, s_hires_luma, HIRES_W * HIRES_H);
+    DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
+    if (res.success && res.content.length() > 0 && s_decode_cb) {
+        s_decode_cb(res.type_name.c_str(), res.content.c_str());
+        Serial.println("[PREVIEW] decode: DECODED");
+        return true;
     }
-
-    // Optionally autofocus (only if the probe reported an AF-capable lens).
-    if (s_af_available) {
-        Serial.println("[PREVIEW] hi-res: triggering autofocus...");
-        camera_af_trigger_oneshot();
-    }
-
-    bool decoded = false;
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) {
-        Serial.println("[PREVIEW] hi-res: fb_get returned NULL");
-    } else {
-        Serial.printf("[PREVIEW] hi-res fb: %ux%u fmt=%u len=%u\n",
-                      fb->width, fb->height, fb->format, fb->len);
-        if (fb->format == PIXFORMAT_RGB565 &&
-            fb->width == HIRES_W && fb->height == HIRES_H) {
-            rgb565_to_luma_local((const uint16_t*)fb->buf, s_hires_luma, HIRES_W * HIRES_H);
-            DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
-            if (res.success && res.content.length() > 0 && s_decode_cb) {
-                s_decode_cb(res.type_name.c_str(), res.content.c_str());
-                decoded = true;
-            }
-        } else {
-            Serial.println("[PREVIEW] hi-res: frame not SVGA/RGB565 — skipped");
-        }
-    }
-    if (fb) esp_camera_fb_return(fb);
-
-    camera_set_rgb565_qvga();
-    // Drop one QVGA frame to resync.
-    camera_fb_t* q = esp_camera_fb_get();
-    if (q) esp_camera_fb_return(q);
-
-    Serial.printf("[PREVIEW] hi-res: %s\n", decoded ? "DECODED" : "no code");
-    return decoded;
+    Serial.println("[PREVIEW] decode: no code");
+    return false;
 }
 
 // ─── Core 0: Frame Capture ────────────────────────────────────────────────────
@@ -164,8 +133,8 @@ static void capture_task(void* param) {
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
         s->set_pixformat(s, PIXFORMAT_RGB565);
-        s->set_framesize(s, FRAMESIZE_QVGA);
-        Serial.printf("[PREVIEW] sensor: QVGA RGB565, PID=0x%02x\n", s->id.PID);
+        s->set_framesize(s, FRAMESIZE_SVGA);
+        Serial.printf("[PREVIEW] sensor: SVGA RGB565, PID=0x%02x\n", s->id.PID);
     }
 
     camera_fb_t* fb = nullptr;
@@ -217,21 +186,18 @@ static void capture_task(void* param) {
         // ── Barcode decode on the full-resolution frame ──
         // Runs on Core 0. barcode_decode() converts RGB565 → luma internally and
         // ── Decode is user-triggered, not per-frame ──
-        // Live QVGA frames are preview-only (keeps fps high). A short press on
-        // the SCAN page sets s_hires_requested; we then grab one SVGA 800x600
-        // frame and run the full decoder (QR + 1D) at high resolution — enough
-        // to resolve fine product-label barcodes. The camera's native
-        // resolution (not the QVGA preview) is what matters for decoding.
+        // Live SVGA frames are downsampled for preview (above). A short press on
+        // the SCAN page sets s_hires_requested; we then decode the CURRENT SVGA
+        // frame directly (QR downsampled to QVGA, 1D at full 800x600). No sensor
+        // mode switch — the camera is always at SVGA.
         if (s_decode_cb && s_hires_requested &&
             fb->format == PIXFORMAT_RGB565 &&
-            fb->width == 320 && fb->height == 240) {
+            fb->width == SRC_W && fb->height == SRC_H) {
             s_hires_requested = false;
-            esp_camera_fb_return(fb);   // release before switching modes
-            fb = nullptr;
-            try_hires_decode();
+            decode_current_frame(fb);
         }
 
-        if (fb) esp_camera_fb_return(fb);
+        esp_camera_fb_return(fb);
         fb = nullptr;
 
         delay(20);

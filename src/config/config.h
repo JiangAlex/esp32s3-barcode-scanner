@@ -52,7 +52,11 @@
 
 // ─── Camera Settings (OV5640, compatible with OV2640) ───────────────────────
 
-#define CAM_FRAME_SIZE      FRAMESIZE_QVGA     // 320x240 for barcode scanning
+// Always-on SVGA 800x600: decoding needs the resolution to resolve fine 1D
+// product-label bars; preview is downsampled from this to the viewfinder. Note:
+// esp32-camera allocates the framebuffer at init from this size and cannot grow
+// it at runtime, so we must init at the largest size we ever decode.
+#define CAM_FRAME_SIZE      FRAMESIZE_SVGA      // 800x600
 #define CAM_JPEG_QUALITY    12                  // 0-63, lower = better quality
 #define CAM_FB_COUNT        2                   // Frame buffer count (PSRAM)
 

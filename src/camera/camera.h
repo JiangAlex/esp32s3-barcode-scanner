@@ -73,14 +73,10 @@ bool camera_af_is_available(void);
 bool camera_af_trigger_oneshot(void);
 
 /**
- * @brief Switch the sensor to SVGA (800x600) RGB565 for a hi-res single shot.
- *        Returns true on success. Pair with camera_set_rgb565_qvga() to revert.
+ * @brief Ensure the sensor is in SVGA (800x600). The camera is initialized at
+ *        SVGA so decoding always has full resolution; this is a safety no-op
+ *        re-assert. Returns true on success.
  */
 bool camera_set_rgb565_svga(void);
-
-/**
- * @brief Switch the sensor back to QVGA (320x240) RGB565 (live preview mode).
- */
-bool camera_set_rgb565_qvga(void);
 
 #endif /* CAMERA_H */
