@@ -19,6 +19,18 @@ void scan_preview_start(uint16_t x, uint16_t y, uint16_t w, uint16_t h);
 void scan_preview_stop(void);
 bool scan_preview_is_running(void);
 
+// Decode result callback. Invoked from the Core 0 capture task when a barcode
+// is successfully decoded (subject to SCAN_COOLDOWN_MS debounce).
+//
+// IMPORTANT: the callback runs on Core 0. Do NOT call LVGL APIs directly from
+// it — LVGL must only be touched on Core 1. Marshal the result to the LVGL
+// task (e.g. copy into a pending buffer consumed by the LVGL task).
+//
+// Strings are owned by the caller's stack and are only valid during the call;
+// copy them if you need to keep them.
+typedef void (*scan_decode_cb_t)(const char* type_name, const char* content);
+void scan_preview_set_decode_cb(scan_decode_cb_t cb);
+
 // SPI mutex for serializing LCD access between LVGL flush and scan_preview render
 // Owned by scan_preview; register with display via display_set_spi_mutex()
 extern SemaphoreHandle_t s_spi_mutex;

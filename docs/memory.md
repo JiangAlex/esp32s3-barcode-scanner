@@ -39,7 +39,8 @@ Build now succeeds: RAM 37.9% (124304 / 327680), Flash 21.0% (659893 / 3145728).
 
 - **ESP32-S3** (Waveshare ESP32-S3-Touch-LCD-2, N8R8 label)
 - **Flash**: Winbond W25Q128JVSIQ 16MB
-- **PSRAM**: NOT present (hardware absent, not software disabled)
+- **PSRAM**: ⚠️ 先前記為「NOT present」是**錯誤**結論。實為 8MB Octal (OPI)，
+  只是未在 `platformio.ini` 啟用。詳見下方 "Session 2026-09-22" 根因 #1。
 - **I2C devices**: 0x6B (QMI8658 IMU), 0x7E (unknown — GT911 secondary addr?)
 - **Touch**: No CST816 @ 0x15, no GT911 readable @ 0x5D or 0x7E
 
@@ -160,5 +161,164 @@ All phases completed and verified via `pio run` build success.
 2. `tft.fillRect()` 在硬體上穩定運作
 3. 0x7E I2C 裝置識別（GT911 可能需重置序列）
 4. TouchLib GT911 驅動整合
-5. 完整條碼掃描 UI
-6. OV5640 相機整合
+5. ~~完整條碼掃描 UI~~ ✅ 已完成（見 Session 2026-09-22）
+6. ~~OV5640 相機整合~~ ✅ 已完成（RGB565，見 Session 2026-09-22 根因 #3）
+
+
+---
+
+# Session 2026-09-22 — 完整條碼掃描 UI 打通（預覽 → 解碼 → 顯示）
+
+實機驗證成功：對準二維碼解出 `[DECODE] QR: TEST123`。以下依序記錄本次解決的 8 個根因，
+每項皆以實機 serial 數據定位並驗證。
+
+## ⚠️ 修正先前錯誤結論：PSRAM 其實存在
+
+先前 memory.md「Board Status」寫 **PSRAM: NOT present (hardware absent)** 是**錯的**。
+真相：PSRAM 是 8MB Octal (OPI)，只是 `platformio.ini` 從未啟用，故 `heap_caps_malloc(SPIRAM)`
+回 NULL，被誤判為「硬體不存在」。啟用後 PSRAM 位址 `0x3d80xxxx` 正常配置。
+> 板子實為 **N16R8**（16MB QIO Flash + 8MB OPI PSRAM），對齊官方 demo `CONFIG_SPIRAM_MODE_OCT=y`。
+
+## 根因與修正（依發現順序）
+
+### 1. PSRAM 未啟用（根因中的根因）
+- 症狀：`[LVGL] PSRAM alloc failed`、`Failed to resize quirc buffer`、`FAILED to allocate shared framebuffer`
+  ——大塊記憶體全擠爆 ~320KB DRAM。
+- 修正（`platformio.ini`）：
+  - `board_build.arduino.memory_type = qio_opi`
+  - `build_flags` 加 `-D BOARD_HAS_PSRAM`
+- 驗證：`[LVGL] buf1=0x3d80a01c`（PSRAM 段）、`Quirc QR decoder initialized`、`[PREVIEW] started`。
+
+### 2. capture task stack 過小（兩階段）
+- `preview_cap` task 加了 `barcode_decode()` 後爆 stack。
+- quirc `identify`（`quirc_end`）需 ~16KB；`quirc_decode`（Reed-Solomon + ~8KB `quirc_data`）需更多。
+- 症狀演進：4KB→掃描即 overflow；16KB→**掃到 QR 進入 decode 才** overflow（`Stack canary ... preview_cap`）。
+- 修正：`xTaskCreatePinnedToCore(capture_task, "preview_cap", 32768, ...)`（`scan_preview.cpp`）。
+
+### 3. OV5640 grayscale 不可用
+- esp32-camera 對 OV5640 `PIXFORMAT_GRAYSCALE` 支援不穩 → 畫面認不出。
+- 官方 Arduino demo（`reference/.../09_lvgl_camera`）用 `PIXFORMAT_RGB565`。相機 GPIO 與本專案完全一致。
+- 修正：`camera.cpp` 改 `PIXFORMAT_RGB565`、`fb_location=PSRAM`、`fb_count=2`；
+  `scan_preview.cpp` 預覽降採樣改處理 RGB565（2 byte/px）。
+
+### 4. SPI 跨 task race（crash）
+- 症狀：`assert failed: xQueueGenericSend ... spiEndTransaction`，backtrace 在 LVGL `flush_cb` 與
+  Core 0 quirc 之間。
+- 根因：`render_task` 的 overlay（角標/掃描線）繪圖在 `s_spi_mutex` 釋放**之後**，與 LVGL flush 的
+  SPI transaction 交錯。
+- 修正：VF 影像 + 所有 overlay 全包進**單一 `s_spi_mutex` + 單一 `startWrite/endWrite`**。
+- 註：`display.cpp` 的 `lvgl_flush_cb` 已取同一 `s_spi_mutex`（`lv_conf.h` `LV_COLOR_16_SWAP=1`）。
+
+### 5. RGB565 byte order（顏色錯）
+- 來回試錯後用**診斷法定案**：在取景框頂端畫三條已知純色（fillRect 保證邏輯色正確），
+  對照相機影像。
+- 實機結果：參考條「紅/綠/藍」正確（面板 RGB 非 BGR）；相機影像用 **no-swap**（`writePixels` 不帶 swap，
+  原生 uint16 讀取）時顏色正確。
+- 結論：相機 RGB565 byte 排列與面板一致，**不需 swap**。手動組 big-endian、`swap=true` 都是錯的。
+
+### 6. 解碼未接 RGB565
+- `barcode_decode()` 原假設 grayscale（`memcpy`）。加 RGB565 → luma（Rec.601：`(r*77+g*150+b*29)>>8`），
+  byte order 與顯示端一致（原生讀取）。
+- 解碼 gate 改為接受 `PIXFORMAT_RGB565`。
+
+### 7. ECC failure（最難，quirc size=21 穩定但資料糾錯失敗）
+- 診斷輸出 `count=1 size=21 err=ECC failure`：quirc 幾何/格式全對（穩定辨識 v1 QR），
+  純卡在**模組黑白取樣**。
+- 誤區：先加 `sharpness=2`「增強對比」→ **反而惡化**（邊界振鈴/過衝破壞取樣）。改回 `sharpness=0`+`contrast=1`
+  後偶爾成功但**不穩**。
+- **根本解法：Otsu 自適應二值化**（`barcode_decoder.cpp`）——luma 直方圖算最佳閾值，硬壓純黑/白(0/255)
+  再餵 quirc。實機：對準幾乎立即解出，穩定。
+- 成本：偵測到 QR 時多三趟全幀處理，fps 7.5 → ~2.5（僅解碼期間）。
+
+### 8. 掃描頁省電變暗干擾
+- `main.cpp` loop：`if (ui_get_current_page()==UI_PAGE_SCAN) power_update_idle_time();`
+  掃描頁保持背光全亮。
+
+## 掃描 UI 互動（已實作）
+- 單鍵（BOOT）：SCAN 頁短按=切模式（QUERY/INPUT/INVENTORY）、長按=確認（盤點跳清單頁）。
+- 取景框 200×150 置中，四角括號 + 綠掃描線；1.6× 固定點降採樣。
+- 解碼在 Core 0 capture task 連續嘗試，`SCAN_COOLDOWN_MS` 去重；結果經 pending 緩衝 marshaled 到
+  Core 1 LVGL（`ui_process_pending_scan`）。
+
+## 修改檔案（本次）
+- `platformio.ini` — PSRAM 啟用（qio_opi + BOARD_HAS_PSRAM）
+- `src/camera/camera.cpp` — RGB565、PSRAM fb、QR sensor tuning（sharpness=0/contrast=1）
+- `src/scan_preview.cpp` — RGB565 降採樣、單一 SPI mutex、32KB stack、解碼鉤子、取景框放大
+- `src/decoder/barcode_decoder.cpp` — RGB565→luma + Otsu 二值化 + 動態解碼
+- `src/ui/ui_main.cpp` / `.h` — 掃描結果 pending 緩衝、模式互動、per-mode 回饋
+- `src/main.cpp` — LVGL task 呼叫 `ui_process_pending_scan`、掃描頁保持背光
+- `docs/TODO.md` — 決策記錄 + 1(b) SVGA 方案
+
+**最終 build**：RAM 41.6% (136372 / 327680)、Flash 23.9% (752301 / 3145728)。
+
+## 已知特性（非缺陷）
+- 解碼連續嘗試，需對準 1-3 秒；定焦 + 手持正常行為。
+- 偵測到 QR 時 fps 降至 ~2.5（Otsu 三趟全幀）；無 QR 時 7.5。
+- 僅支援 QR Code（quirc）；1D 條碼仍為 TODO。
+
+## 下一步（已定案待實作，詳見 TODO.md）
+- **方案 1(b) 提升成功率**：QVGA 輕量偵測 → 偵測到切 **SVGA 800×600** 抓單張 → Otsu+解碼 → 切回 QVGA。
+  quirc 需動態 resize（已確認可重複呼叫；SVGA buffer ~470KB 注意記憶體）。
+- 其他：MQTT 查詢分派、BLE HID 輸出、1D 條碼解碼。
+
+
+---
+
+# Session 2026-09-26 — 掃描成功率提升（QR 多閾值/ROI + SVGA 精解 + 1D 條碼 + OV5640 AF）
+
+對應 Redmine issue #61（project `xq_xscriqf`）。目標：提升「產品包裝小標籤」掃描成功率，
+支援 QR + 1D 條碼（EAN-13/UPC-A/Code128）。分 7 個 task 實作，全部通過 host 測試與 `pio run` build。
+
+## 新增 1D 條碼解碼器（`lib/barcode1d/`）
+
+純 C、無 heap、line-scan。選型理由：ZXing/ZBar 對 ESP32 太重，`esp_code_scanner`（ESP-IDF
+component）與 Arduino framework 整合有風險。故自製，與 vendored quirc 架構一致。
+
+- **EAN-13 / UPC-A**：用 **module-grid 取樣**（非逐 digit run 切割）。關鍵根因：G-code digit
+  首模組是 bar，會與相鄰元素 run 合併，逐 digit 切割必然失敗。grid 取樣定位 start/center/end
+  guard → 推導模組節距 → 對 95 模組中心取樣，對 run 合併免疫（商用掃描器標準做法）。
+  L-code 首模組=space、G-code 首模組=bar；checksum 偶 index 權重 1、奇 index 權重 3；
+  leading digit 由 6 個左 digit 的 L/G parity 反查 PARITY 表。UPC-A = EAN-13 lead=0 去開頭 0。
+- **Code128**：run-length 寬度模式比對（元素本身 bar/space 交替，無合併問題）。107-entry
+  pattern 表，Code A/B/C，checksum = (start + Σ pos×val) mod 103。Code C 成對數字，Code B ASCII v+32。
+- **`bc1d_decode_image()`**：多掃描線 wrapper，取 N 條等距水平線（偏中央），任一成功即回傳。
+- **測試**：`test/test_barcode1d.c` host 端（gcc）合成理想掃描線，**24/24 通過**，`-Wall` 無警告。
+  編譯：`gcc -Ilib/barcode1d test/test_barcode1d.c lib/barcode1d/barcode1d.c -o /tmp/bc1dtest`
+
+## 解碼管線重構（`barcode_decoder.cpp`）
+
+- luma 單次產生到 `s_luma`（PSRAM），QR 與 1D 共用，消除先前重複的 RGB565→luma 轉換。
+- **ROI Otsu**（`otsu_threshold_roi`）：閾值只從中央 70% 區域算，排除背景（桌面/手指/反光）污染直方圖。
+- **QR 多閾值重試**：base、±20、±40 共 5 組閾值，解決 v1 QR 邊界模組翻轉的 ECC failure。
+  找不到 QR 的幀第一次 identify count=0 即快速跳過，只有真有 QR 但邊界模糊才多跑。
+- 抽出 `decode_core(luma,w,h)`，`barcode_decode()`（QVGA）與 `barcode_decode_luma()`
+  （任意尺寸，quirc_resize 後還原 QVGA）共用。
+
+## SVGA 高解析度單張精解（`scan_preview.cpp`）
+
+QVGA 常駐偵測，連續 40 幀未解出且過 4s cooldown → 自動切 SVGA 800×600 抓單張精解 → 切回。
+自動觸發（非按鍵，因 SCAN 頁短按=切模式、長按=確認已佔用）。`s_hires_luma` PSRAM buffer(480KB)。
+記憶體：SVGA fb + luma + quirc resize ≈ 3.8MB < 8MB PSRAM。切換期間 render_task sem timeout 續跑不崩。
+
+## OV5640 自動對焦（`camera.cpp` + vendored `ov5640_af_firmware.h`）
+
+- 根因：esp32-camera 的 `ov5640_af.c` 被 `CONFIG_CAMERA_AF_SUPPORT`（IDF menuconfig）gate 掉，
+  Arduino build 不啟用，且函式在 private_include。故改用**公開 `sensor_t` set_reg/get_reg 自行實作**，
+  vendor AF firmware blob（~4KB）到 `src/camera/ov5640_af_firmware.h`。
+- `camera_af_probe()`：reset MCU(0x3000=0x20) → 寫 blob 到 0x8000 → start(0x3000=0x00) →
+  等 FW_STATUS(0x3029)==0x70 IDLE → 送 0x3022=0x03 單次對焦 → 輪詢直到 0x10 FOCUSED 或 timeout。
+  開機在 `camera_init()` 尾端呼叫，serial 印 `[AF] RESULT`。
+- AF 觸發**資料驅動**：`camera_af_is_available()` 回報探測是否觀察到 FOCUSED；hi-res 路徑據此
+  自動啟用/跳過 AF，無需硬編。
+
+## ⚠️ 待實機驗證（無法在開發環境確認）
+
+1. **鏡頭是否 AF 版**：開機看 serial `[AF] RESULT: lens FOCUSED (0x10)` = AF 版；
+   `no FOCUSED state` = 定焦。決定 hi-res 是否觸發對焦。
+2. **1D 條碼實機解碼**：拿實際產品 EAN-13/Code128 標籤測試（host 測試僅證明演算法正確）。
+3. **QR ROI+多閾值 成功率提升**：對比對準所需時間是否縮短。
+4. **SVGA 精解**：小標籤成功率提升、切換延遲、PSRAM 用量（監控 heap_caps free）。
+
+## 最終 build
+
+RAM 42.2% (138444 / 327680)、Flash 24.3% (764389 / 3145728)。

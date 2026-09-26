@@ -14,18 +14,37 @@
 #include "scan_preview.h"
 #include "display/display.h"
 #include "camera/camera.h"
+#include "decoder/barcode_decoder.h"
+#include "config/config.h"
 #include <Arduino.h>
 #include <LovyanGFX.hpp>
+#include <esp_heap_caps.h>
 
 // Viewfinder dimensions (must fit in LCD, centered in 240x320)
-#define VF_W   120
-#define VF_H   90
+#define VF_W   200
+#define VF_H   150
 #define VF_X   ((240 - VF_W) / 2)
 #define VF_Y   ((320 - VF_H) / 2)
 
-// Downscale factor from QVGA (320x240) to viewfinder
-#define DOWN_SCALE_X  (320 / VF_W)   // 2
-#define DOWN_SCALE_Y  (240 / VF_H)   // 2
+// Source camera frame (QVGA)
+#define SRC_W  320
+#define SRC_H  240
+
+// ── Hi-res single-shot (SVGA) pipeline ──
+// When the live QVGA path fails to decode for a while, switch to SVGA 800x600,
+// grab one frame, run the full decoder at high resolution (better for small/
+// fine product-label barcodes), then switch back. Trigger after this many
+// consecutive QVGA frames without a decode.
+#define HIRES_W            800
+#define HIRES_H            600
+#define HIRES_LUMA_PX      (HIRES_W * HIRES_H)
+#define HIRES_TRIGGER_FRAMES 40    // ~ several seconds at preview fps
+#define HIRES_COOLDOWN_MS  4000    // min gap between hi-res attempts
+
+// Fixed-point (16.16) sampling steps for non-integer downscale.
+// QVGA 320x240 → VF 200x150 is a 1.6x reduction on both axes.
+#define STEP_X  ((SRC_W << 16) / VF_W)   // src px per dst px, 16.16
+#define STEP_Y  ((SRC_H << 16) / VF_H)
 
 // ─── Shared state (protected by semaphore) ───────────────────────────────────
 
@@ -47,12 +66,87 @@ static SemaphoreHandle_t s_mutex_frame = nullptr;
 // Created here (owner), registered with display via display_set_spi_mutex()
 SemaphoreHandle_t s_spi_mutex = nullptr;
 
+// Decode callback (invoked from Core 0 capture task) + one-time decoder init flag
+static scan_decode_cb_t s_decode_cb = nullptr;
+static bool s_decoder_ready = false;
+
+// SVGA luma buffer (PSRAM). Allocated lazily on the first hi-res attempt.
+static uint8_t* s_hires_luma = nullptr;
+static bool     s_af_available = false;   // set by scan_preview_start from probe
+
 // Convert 8-bit grayscale to RGB565
 static inline uint16_t gray_to_rgb565(uint8_t g) {
     uint8_t r = g & 0xF8;
     uint8_t gg = g & 0xFC;
     uint8_t b = g << 3;
     return (r << 8) | (gg << 3) | (b >> 3);
+}
+
+// RGB565 → 8-bit luma (Rec.601), native uint16 read (byte order matches panel).
+static void rgb565_to_luma_local(const uint16_t* src, uint8_t* dst, int npx) {
+    for (int i = 0; i < npx; i++) {
+        uint16_t px = src[i];
+        uint8_t r = (px >> 11) & 0x1F;
+        uint8_t g = (px >> 5)  & 0x3F;
+        uint8_t b =  px        & 0x1F;
+        uint16_t r8 = (r << 3) | (r >> 2);
+        uint16_t g8 = (g << 2) | (g >> 4);
+        uint16_t b8 = (b << 3) | (b >> 2);
+        dst[i] = (uint8_t)((r8 * 77 + g8 * 150 + b8 * 29) >> 8);
+    }
+}
+
+// Perform one hi-res (SVGA) capture + decode. Switches the sensor to SVGA,
+// optionally triggers autofocus, grabs a settled frame, converts to luma, runs
+// the full decoder at 800x600, then switches back to QVGA. Returns true if a
+// code was decoded (result delivered via s_decode_cb). Runs on Core 0.
+static bool try_hires_decode(void) {
+    if (!s_hires_luma) {
+        s_hires_luma = (uint8_t*)heap_caps_malloc(HIRES_LUMA_PX, MALLOC_CAP_SPIRAM);
+        if (!s_hires_luma) {
+            Serial.println("[PREVIEW] hi-res luma alloc failed; skipping SVGA path");
+            return false;
+        }
+    }
+
+    Serial.println("[PREVIEW] hi-res: switching to SVGA...");
+    if (!camera_set_rgb565_svga()) {
+        camera_set_rgb565_qvga();
+        return false;
+    }
+
+    // Discard a few frames so the sensor's AE/AWB settle at the new resolution.
+    for (int i = 0; i < 3; i++) {
+        camera_fb_t* w = esp_camera_fb_get();
+        if (w) esp_camera_fb_return(w);
+    }
+
+    // Optionally autofocus (only if the probe reported an AF-capable lens).
+    if (s_af_available) {
+        Serial.println("[PREVIEW] hi-res: triggering autofocus...");
+        camera_af_trigger_oneshot();
+    }
+
+    bool decoded = false;
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb && fb->format == PIXFORMAT_RGB565 &&
+        fb->width == HIRES_W && fb->height == HIRES_H) {
+        rgb565_to_luma_local((const uint16_t*)fb->buf, s_hires_luma, HIRES_W * HIRES_H);
+        DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
+        if (res.success && res.content.length() > 0 && s_decode_cb) {
+            s_decode_cb(res.type_name.c_str(), res.content.c_str());
+            decoded = true;
+        }
+    }
+    if (fb) esp_camera_fb_return(fb);
+
+    camera_set_rgb565_qvga();
+    // Drop one QVGA frame to resync.
+    camera_fb_t* q = esp_camera_fb_get();
+    if (q) esp_camera_fb_return(q);
+
+    Serial.printf("[PREVIEW] hi-res: %s\n", decoded ? "DECODED" : "no code");
+    return decoded;
 }
 
 // ─── Core 0: Frame Capture ────────────────────────────────────────────────────
@@ -63,9 +157,9 @@ static void capture_task(void* param) {
 
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
-        s->set_pixformat(s, PIXFORMAT_GRAYSCALE);
+        s->set_pixformat(s, PIXFORMAT_RGB565);
         s->set_framesize(s, FRAMESIZE_QVGA);
-        Serial.printf("[PREVIEW] sensor: QVGA Grayscale, PID=0x%02x\n", s->id.PID);
+        Serial.printf("[PREVIEW] sensor: QVGA RGB565, PID=0x%02x\n", s->id.PID);
     }
 
     camera_fb_t* fb = nullptr;
@@ -86,24 +180,27 @@ static void capture_task(void* param) {
                 fb->len, fb->width, fb->height, fb->format, fb->buf[0], fb->buf[1], fb->buf[2]);
         }
 
-        if (fb->format == PIXFORMAT_GRAYSCALE && fb->width == 320 && fb->height == 240) {
-            // Downscale QVGA → viewfinder and convert GRAY → RGB565
+        if (fb->format == PIXFORMAT_RGB565 && fb->width == SRC_W && fb->height == SRC_H) {
+            // Downscale QVGA → viewfinder (fixed-point 16.16 sampling). Source is
+            // RGB565, 2 bytes/pixel. Verified on-device: the camera's byte layout
+            // matches the panel, so copy each pixel verbatim (no swap).
             if (xSemaphoreTake(s_mutex_frame, pdMS_TO_TICKS(10)) == pdTRUE) {
                 uint16_t* dst = (uint16_t*)s_framebuf;
 
+                uint32_t src_y = 0;  // 16.16
                 for (uint16_t dy = 0; dy < VF_H; dy++) {
-                    uint16_t src_row = dy * DOWN_SCALE_Y;
-                    uint8_t* src_row_ptr = fb->buf + src_row * 320;
+                    uint8_t* src_row_ptr = fb->buf + (src_y >> 16) * SRC_W * 2;  // 2 bytes/px
+                    uint32_t src_x = 0;  // 16.16
 
                     for (uint16_t dx = 0; dx < VF_W; dx++) {
-                        uint8_t gray = src_row_ptr[dx * DOWN_SCALE_X];
-                        // Expand 8-bit gray to RGB565 using bit replication
-                        // RRRRR = gray[7:3], GGGGGG = gray[7:2], BBBBB = gray[7:3]
-                        uint16_t r = (gray << 3) | (gray >> 2);  // 5 bits: replicate top 5
-                        uint16_t g = (gray << 2) | (gray >> 4);  // 6 bits: replicate top 6
-                        uint16_t b = (gray << 3) | (gray >> 2);  // 5 bits: replicate top 5
-                        dst[dy * VF_W + dx] = (r << 11) | (g << 5) | b;
+                        // Read the pixel as a native uint16_t. The official demo
+                        // feeds fb->buf straight to LVGL without byte-swapping,
+                        // so treat it as little-endian here too.
+                        uint32_t sx = (src_x >> 16);
+                        dst[dy * VF_W + dx] = ((uint16_t*)src_row_ptr)[sx];
+                        src_x += STEP_X;
                     }
+                    src_y += STEP_Y;
                 }
                 xSemaphoreGive(s_mutex_frame);
 
@@ -111,7 +208,54 @@ static void capture_task(void* param) {
             }
         }
 
-        esp_camera_fb_return(fb);
+        // ── Barcode decode on the full-resolution frame ──
+        // Runs on Core 0. barcode_decode() converts RGB565 → luma internally and
+        // feeds quirc the full frame. Debounced by SCAN_COOLDOWN_MS.
+        if (s_decode_cb &&
+            fb->format == PIXFORMAT_RGB565 &&
+            fb->width == 320 && fb->height == 240) {
+
+            static uint32_t s_last_decode_ms = 0;
+            static char     s_last_content[128] = {0};
+            static uint32_t s_miss_frames = 0;
+            static uint32_t s_last_hires_ms = 0;
+
+            uint32_t now = millis();
+            DecodeResult res = barcode_decode(fb);
+
+            if (res.success && res.content.length() > 0) {
+                s_miss_frames = 0;
+                bool same_as_last = (strncmp(s_last_content, res.content.c_str(),
+                                             sizeof(s_last_content) - 1) == 0);
+                bool cooled_down  = (now - s_last_decode_ms) >= SCAN_COOLDOWN_MS;
+
+                // Fire if it's a different code, or the same code after cooldown.
+                if (!same_as_last || cooled_down) {
+                    s_last_decode_ms = now;
+                    strncpy(s_last_content, res.content.c_str(),
+                            sizeof(s_last_content) - 1);
+                    s_last_content[sizeof(s_last_content) - 1] = '\0';
+                    s_decode_cb(res.type_name.c_str(), res.content.c_str());
+                }
+            } else {
+                // No decode. After enough consecutive misses, escalate to a
+                // hi-res SVGA single-shot (small/fine product-label barcodes
+                // often need the extra resolution). Rate-limited by cooldown.
+                s_miss_frames++;
+                if (s_miss_frames >= HIRES_TRIGGER_FRAMES &&
+                    (now - s_last_hires_ms) >= HIRES_COOLDOWN_MS) {
+                    s_miss_frames = 0;
+                    s_last_hires_ms = now;
+                    // fb is returned below; release it before switching modes.
+                    esp_camera_fb_return(fb);
+                    fb = nullptr;
+                    try_hires_decode();
+                    s_last_hires_ms = millis();   // account for time spent
+                }
+            }
+        }
+
+        if (fb) esp_camera_fb_return(fb);
         fb = nullptr;
 
         delay(20);
@@ -139,41 +283,25 @@ static void render_task(void* param) {
 
     // Copy frame from shared buffer (lock-protected)
     if (xSemaphoreTake(s_mutex_frame, pdMS_TO_TICKS(10)) == pdTRUE) {
-        // Draw test pattern on first frame to verify display pipeline
-        static bool test_drawn = false;
-        if (!test_drawn) {
-            if (s_spi_mutex) xSemaphoreTake(s_spi_mutex, portMAX_DELAY);
-            tft.startWrite();
-            // Red bar (left 1/4)
-            tft.fillRect(VF_X, VF_Y, VF_W/4, VF_H, 0xF800);
-            // Green bar (second 1/4)
-            tft.fillRect(VF_X + VF_W/4, VF_Y, VF_W/4, VF_H, 0x07E0);
-            // Blue bar (third 1/4)
-            tft.fillRect(VF_X + VF_W/2, VF_Y, VF_W/4, VF_H, 0x001F);
-            // White bar (right 1/4)
-            tft.fillRect(VF_X + VF_W*3/4, VF_Y, VF_W/4, VF_H, 0xFFFF);
-            tft.endWrite();
-            if (s_spi_mutex) xSemaphoreGive(s_spi_mutex);
-            test_drawn = true;
-            xSemaphoreGive(s_mutex_frame);
-            continue;
-        }
-
-        // Draw the downscaled frame as a rectangle on the display
+        // Serialize ALL LCD access against LVGL's flush_cb for the entire draw
+        // sequence. LVGL runs in a different task on the same core; if we split
+        // the image push and the overlay draws across separate startWrite/
+        // endWrite spans (or leave overlays unguarded), LVGL's flush can
+        // interleave its own SPI transaction and trip the Arduino SPI HAL's
+        // xQueueGenericSend assert. One lock + one startWrite/endWrite avoids it.
         if (s_spi_mutex) xSemaphoreTake(s_spi_mutex, portMAX_DELAY);
         tft.startWrite();
+
+        // Camera image. Confirmed on-device: the camera's RGB565 layout matches
+        // the panel's expected order, so push verbatim (no byte swap).
         tft.setAddrWindow(VF_X, VF_Y, VF_W, VF_H);
-
-        // Push all pixels at once
         tft.writePixels((uint16_t*)s_framebuf, VF_W * VF_H);
-        tft.endWrite();
-        if (s_spi_mutex) xSemaphoreGive(s_spi_mutex);
 
-        // Draw black border first (creates contrast ring around viewfinder)
+        // Black border (contrast ring around viewfinder)
         uint16_t bdr = 3;
         tft.drawRect(VF_X - bdr, VF_Y - bdr, VF_W + bdr*2, VF_H + bdr*2, 0x0000);
 
-        // Draw frame overlay brackets (thick white for max contrast on grayscale)
+        // Frame overlay brackets (thick white for max contrast on grayscale)
         uint16_t col = 0xFFFF;  // white (max brightness)
         uint16_t thick = 5;      // thicker strokes
         uint16_t arm = 36;      // longer arms
@@ -210,6 +338,29 @@ static void render_task(void* param) {
         tft.drawFastVLine(VF_X + VF_W - thick + 1, VF_Y + VF_H - arm, arm, col);
         tft.drawFastVLine(VF_X + VF_W - thick + 2, VF_Y + VF_H - arm, arm, col);
 
+        // ── Scan line animation ──
+        // A green line sweeps up and down inside the viewfinder. Each rendered
+        // frame overwrites the whole VF image, so the previous line position is
+        // erased naturally — we only need to draw it at its current position.
+        {
+            static int16_t line_y   = 0;     // offset within VF (0 .. VF_H-1)
+            static int8_t  line_dir = 1;      // +1 down, -1 up
+            const uint16_t scan_col = 0x07E0; // green
+            const int16_t  step     = 4;      // px per frame
+
+            int16_t y = VF_Y + line_y;
+            // Draw a 2px-thick line, inset horizontally so it sits inside the frame.
+            tft.drawFastHLine(VF_X + 4, y,     VF_W - 8, scan_col);
+            tft.drawFastHLine(VF_X + 4, y + 1, VF_W - 8, scan_col);
+
+            line_y += line_dir * step;
+            if (line_y >= VF_H - 2) { line_y = VF_H - 2; line_dir = -1; }
+            else if (line_y <= 0)   { line_y = 0;         line_dir =  1; }
+        }
+
+        tft.endWrite();
+        if (s_spi_mutex) xSemaphoreGive(s_spi_mutex);
+
         xSemaphoreGive(s_mutex_frame);
     }
 
@@ -231,6 +382,16 @@ static void render_task(void* param) {
 void scan_preview_start(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
     (void)x; (void)y; (void)w; (void)h;  // Fixed geometry
     if (s_running) return;
+
+    // One-time barcode decoder init (quirc buffer sized to QVGA 320x240)
+    if (!s_decoder_ready) {
+        barcode_decoder_init();
+        s_decoder_ready = true;
+    }
+
+    // Use AF in the hi-res path only if the startup probe confirmed an AF lens.
+    s_af_available = camera_af_is_available();
+    Serial.printf("[PREVIEW] hi-res AF %s\n", s_af_available ? "enabled" : "disabled (fixed-focus)");
 
     // Allocate shared framebuffer in DRAM (VF_W * VF_H * 2 bytes)
     if (!s_framebuf) {
@@ -256,10 +417,14 @@ void scan_preview_start(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
 
     s_running = true;
 
-    // Start capture task on Core 0 (frame acquisition only)
-    xTaskCreatePinnedToCore(capture_task, "preview_cap", 4096, NULL, 5, &s_task_capture, 0);
+    // Start capture task on Core 0.
+    // Stack is 32KB: barcode_decode() → quirc. quirc_decode() (Reed-Solomon
+    // error correction + a ~8KB quirc_data struct on the stack) needs far more
+    // than the identify stage; 16KB overflowed the moment a real QR was found.
+    xTaskCreatePinnedToCore(capture_task, "preview_cap", 32768, NULL, 5, &s_task_capture, 0);
 
-    // Start render task on Core 1 (LovyanGFX calls — safe on same core as LVGL)
+    // Start render task on Core 1 (LovyanGFX calls — safe on same core as LVGL).
+    // No decoding here, so 4KB is sufficient.
     xTaskCreatePinnedToCore(render_task, "preview_disp", 4096, NULL, 3, &s_task_render, 1);
 
     Serial.println("[PREVIEW] started (capture=Core0, render=Core1)");
@@ -290,4 +455,8 @@ void scan_preview_stop(void) {
 
 bool scan_preview_is_running(void) {
     return s_running;
+}
+
+void scan_preview_set_decode_cb(scan_decode_cb_t cb) {
+    s_decode_cb = cb;
 }

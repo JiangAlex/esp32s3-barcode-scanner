@@ -43,6 +43,20 @@ void barcode_decoder_init(void);
 DecodeResult barcode_decode(camera_fb_t* fb);
 
 /**
+ * @brief Decode from a standalone grayscale (luma) buffer of arbitrary size.
+ *
+ * Used by the high-resolution single-shot pipeline (SVGA). Resizes the quirc
+ * buffer to (w,h) for QR, applies ROI Otsu + multi-threshold retry, and runs
+ * the 1D multi-scanline decoder. Restores the quirc buffer to QVGA afterwards.
+ *
+ * @param luma  grayscale buffer, w*h bytes
+ * @param w     width
+ * @param h     height
+ * @return DecodeResult
+ */
+DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h);
+
+/**
  * @brief Get human-readable name for barcode type.
  */
 const char* barcode_type_to_string(BarcodeType type);

@@ -4,7 +4,7 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 
 ## Features
 
-- **OV2640 攝影機** — 即時掃描 QR Code、DataMatrix、Code128、EAN/UPC 等多種條碼格式
+- **OV5640 攝影機** — 即時掃描 QR Code（quirc）與 1D 條碼 EAN-13 / UPC-A / Code128（自製 line-scan 解碼器）。低解析度標籤自動切 SVGA 800×600 單張精解提升成功率；OV5640 AF 版鏡頭支援單次對焦
 - **LVGL 圖形介面** — 2.8" TFT 240×320，搖桿導航，中英文 i18n 切換
 - **掃描查詢模式** — 掃描條碼透過 MQTT 查詢後端倉管資料庫，顯示完整品項資訊
 - **BLE HID 無線條碼槍** — 模擬藍牙鍵盤，掃描值直接輸出到任何電腦/手機的游標位置
@@ -189,6 +189,7 @@ pio device monitor
 - **2026-08-24**：硬體平台從 ESP32-S3-DevKitC-1 (N16R8) 分體式組裝，改為微雪 ESP32-S3-Touch-LCD-2 一體板。原因：整合度高（螢幕+觸控+相機介面+SD卡+電池充放電全板載），免杜邦線，解析度相同 240×320，適合產品原型。
 - **硬體變更**：ILI9341→ST7789T3、搖桿→電容觸控 (CST816D)、OV2640→OV5640
 - **移植文件**：[PORTING.md](PORTING.md)
+- **2026-09-26**（Redmine #61）：掃描成功率提升。新增自製 1D line-scan 解碼器（`lib/barcode1d/`，EAN-13/UPC-A 用 module-grid 取樣、Code128 用寬度模式，host 測試 24/24）；解碼管線改 ROI Otsu + QR 多閾值重試；低解析度標籤自動切 SVGA 800×600 單張精解；OV5640 AF 透過公開 `sensor_t` set_reg/get_reg 自行實作（firmware vendored），AF 觸發資料驅動（開機探測 `[AF] RESULT` 決定啟用）。詳見 [docs/memory.md](docs/memory.md) Session 2026-09-26。
 
 ## License
 

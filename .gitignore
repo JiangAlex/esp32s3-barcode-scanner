@@ -1,5 +1,6 @@
 .pio
 .vscode
+.env
 **/.DS_Store
 **/*.swp
 docs/

@@ -160,6 +160,9 @@ static void lvgl_task(void* param) {
                 g_ui_update_pending = false;
                 update_btn_ui();
             }
+            // Drain any barcode decoded by the Core 0 preview task (safe here:
+            // this runs on Core 1 with the LVGL lock held).
+            ui_process_pending_scan();
             lv_timer_handler();
             lvgl_unlock();
         }
@@ -337,6 +340,12 @@ void loop() {
             // Reset so we don't fire HOME again while still holding
             g_btn_was_pressed = false;
         }
+    }
+
+    // Keep the screen fully awake while scanning — the SCAN page is an active
+    // task even without button input, so reset the idle timer each loop there.
+    if (ui_get_current_page() == UI_PAGE_SCAN) {
+        power_update_idle_time();
     }
 
     // Power management: dim/off screen after idle

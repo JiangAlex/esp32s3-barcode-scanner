@@ -12,6 +12,8 @@
 
 #include "ui_main.h"
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "config/config.h"
 #include "scan_preview.h"
 
@@ -125,6 +127,30 @@ static lv_obj_t* g_scan_lbl_mode = nullptr;
 // ─── Scan mode state ─────────────────────────────────────────────────────────
 
 static scan_mode_t g_scan_mode = SCAN_MODE_QUERY;
+
+// ─── Cross-core pending scan (Core 0 decode → Core 1 LVGL) ────────────────────
+// The preview capture task runs on Core 0 and cannot touch LVGL. It writes the
+// decoded result here under a mutex; the LVGL task (Core 1) drains it via
+// ui_process_pending_scan().
+
+static portMUX_TYPE g_scan_mux = portMUX_INITIALIZER_UNLOCKED;
+static volatile bool g_scan_pending = false;
+static char g_pending_type[16]     = {0};
+static char g_pending_content[128] = {0};
+
+// Callback invoked from the Core 0 preview task on a successful decode.
+// Keep it minimal: copy strings into the pending buffer, set the flag.
+static void on_preview_decode(const char* type_name, const char* content) {
+    portENTER_CRITICAL(&g_scan_mux);
+    strncpy(g_pending_type, type_name ? type_name : "",
+            sizeof(g_pending_type) - 1);
+    g_pending_type[sizeof(g_pending_type) - 1] = '\0';
+    strncpy(g_pending_content, content ? content : "",
+            sizeof(g_pending_content) - 1);
+    g_pending_content[sizeof(g_pending_content) - 1] = '\0';
+    g_scan_pending = true;
+    portEXIT_CRITICAL(&g_scan_mux);
+}
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
 
@@ -390,7 +416,7 @@ static void create_scan_page(void) {
 
     // Info line
     g_scan_lbl_info = lv_label_create(g_page_scan);
-    lv_label_set_text(g_scan_lbl_info, "Long-press cycles mode");
+    lv_label_set_text(g_scan_lbl_info, "Short: mode  Long: confirm");
     lv_obj_set_style_text_color(g_scan_lbl_info, (lv_color_t){ .full = 0x8410 }, 0); // dim grey
     lv_obj_set_style_text_font(g_scan_lbl_info, &lv_font_montserrat_12, 0);
     lv_obj_align(g_scan_lbl_info, LV_ALIGN_TOP_MID, 0, 95);
@@ -515,8 +541,15 @@ void ui_nav_event(nav_event_t ev) {
         }
 
         case UI_PAGE_SCAN: {
-            if (ev == NAV_CONFIRM) {
-                // Placeholder: toggle a scanning flag
+            if (ev == NAV_NEXT) {
+                // Short press cycles the scan mode (QUERY → INPUT → INVENTORY).
+                ui_cycle_scan_mode();
+            } else if (ev == NAV_CONFIRM) {
+                // Long press confirms the current mode's action.
+                if (g_scan_mode == SCAN_MODE_INVENTORY) {
+                    // Jump to the inventory page to review / upload the batch.
+                    show_page(UI_PAGE_INVENTORY);
+                }
             }
             break;
         }
@@ -528,6 +561,14 @@ void ui_nav_event(nav_event_t ev) {
                     int val = lv_slider_get_value(g_settings_slider);
                     Serial.printf("[UI] brightness=%d\n", val);
                 }
+            }
+            break;
+        }
+
+        case UI_PAGE_INVENTORY: {
+            if (ev == NAV_CONFIRM) {
+                // Long press uploads the accumulated inventory batch.
+                ui_inventory_upload();
             }
             break;
         }
@@ -615,16 +656,44 @@ void ui_on_scan(const char* type_name, const char* content) {
     ui_show_scan_result(type_name, content);
 
     switch (g_scan_mode) {
+        case SCAN_MODE_QUERY:
+            // Query mode: show the code and a "querying" hint. The MQTT layer
+            // (when connected) publishes the query and updates via the response
+            // handler; here we just reflect the scan + pending state.
+            if (g_scan_lbl_info) {
+                lv_label_set_text(g_scan_lbl_info, "Querying warehouse...");
+            }
+            // TODO: mqtt_publish_query(content) once MQTT client is wired.
+            break;
+
+        case SCAN_MODE_INPUT:
+            // Input mode: value would be typed via BLE HID at the cursor.
+            if (g_scan_lbl_info) {
+                lv_label_set_text(g_scan_lbl_info, "Sent via BLE keyboard");
+            }
+            // TODO: ble_hid_type(content) once BLE HID is wired.
+            break;
+
         case SCAN_MODE_INVENTORY:
             if (g_inventory_count < INVENTORY_MAX) {
-                strncpy(g_inventory_items[g_inventory_count].type, type_name, sizeof(g_inventory_items[0].type) - 1);
-                strncpy(g_inventory_items[g_inventory_count].content, content, sizeof(g_inventory_items[0].content) - 1);
+                strncpy(g_inventory_items[g_inventory_count].type, type_name,
+                        sizeof(g_inventory_items[0].type) - 1);
+                g_inventory_items[g_inventory_count].type[sizeof(g_inventory_items[0].type) - 1] = '\0';
+                strncpy(g_inventory_items[g_inventory_count].content, content,
+                        sizeof(g_inventory_items[0].content) - 1);
+                g_inventory_items[g_inventory_count].content[sizeof(g_inventory_items[0].content) - 1] = '\0';
                 g_inventory_count++;
                 if (g_inv_lbl_count) {
                     lv_label_set_text_fmt(g_inv_lbl_count, "%d items scanned", g_inventory_count);
                 }
+                if (g_scan_lbl_info) {
+                    lv_label_set_text_fmt(g_scan_lbl_info, "Added (%d in batch)", g_inventory_count);
+                }
+            } else if (g_scan_lbl_info) {
+                lv_label_set_text(g_scan_lbl_info, "Batch full!");
             }
             break;
+
         default:
             break;
     }
@@ -633,9 +702,31 @@ void ui_on_scan(const char* type_name, const char* content) {
 // ─── Camera Preview ──────────────────────────────────────────────────────────
 
 void ui_preview_start(void) {
+    scan_preview_set_decode_cb(on_preview_decode);
     scan_preview_start(0, 0, 0, 0);  // geometry is fixed internally
 }
 
 void ui_preview_stop(void) {
     scan_preview_stop();
+}
+
+// Drain a pending decode result (called from the LVGL task on Core 1).
+void ui_process_pending_scan(void) {
+    if (!g_scan_pending) return;
+
+    char type[16];
+    char content[128];
+
+    portENTER_CRITICAL(&g_scan_mux);
+    strncpy(type, g_pending_type, sizeof(type));
+    strncpy(content, g_pending_content, sizeof(content));
+    type[sizeof(type) - 1] = '\0';
+    content[sizeof(content) - 1] = '\0';
+    g_scan_pending = false;
+    portEXIT_CRITICAL(&g_scan_mux);
+
+    // Only surface scans while the SCAN page is active.
+    if (g_current_page != UI_PAGE_SCAN) return;
+
+    ui_on_scan(type, content);
 }

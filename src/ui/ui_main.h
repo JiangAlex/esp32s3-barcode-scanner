@@ -133,4 +133,11 @@ void ui_show_photo_result(const char* status, const char* result);
 void ui_preview_start(void);
 void ui_preview_stop(void);
 
+/**
+ * @brief Drain any pending barcode scan captured by the Core 0 preview task.
+ *        Must be called from the LVGL task (Core 1) — it is the only place
+ *        LVGL widgets may be safely updated. Call once per LVGL loop iteration.
+ */
+void ui_process_pending_scan(void);
+
 #endif /* UI_MAIN_H */
