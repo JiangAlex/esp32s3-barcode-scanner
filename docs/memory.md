@@ -322,3 +322,63 @@ QVGA 常駐偵測，連續 40 幀未解出且過 4s cooldown → 自動切 SVGA 
 ## 最終 build
 
 RAM 42.2% (138444 / 327680)、Flash 24.3% (764389 / 3145728)。
+
+
+---
+
+# Session 2026-09-27 — 實機除錯：掃描成功率瓶頸 = 定焦鏡頭
+
+Redmine #61 的實機除錯，依序解掉多個問題後，定位到**根本瓶頸是硬體對焦**。
+
+## 實機除錯歷程（每步以 serial 數據推進）
+
+1. **task_wdt abort**（Core 0 preview_cap，quirc_end jiggle_perspective）
+   → QR 多閾值太貪心。修：時間預算 350ms + 無候選早退 + 每閾值喂狗。
+2. **fps 7.5→3**：QVGA decode 恢復 70ms 但 fps 仍低
+   → 自動 hi-res 每 4s 觸發、每次 ~1s 拖累。修：改使用者短按觸發。
+3. **hi-res: no code**：`fb 800x600 但 len=153600`
+   → esp32-camera framebuffer 依 init frame_size 固定配置，runtime set_framesize
+   無法擴大（issue #433/#635）。修：**常駐 SVGA 初始化**（config.h
+   CAM_FRAME_SIZE=FRAMESIZE_SVGA），預覽 4x 降採樣，短按解當前 SVGA 幀。
+4. **SVGA 仍解不出**：診斷 `luma spread=255`（高對比非模糊/雜訊）但
+   `capstone candidates=0~1`（quirc 找不到 3 個 finder pattern）。
+   → QR 降採樣改 box averaging（抑制摩爾紋）幫助有限。
+5. **確認根因**：能偶爾解出 TEST123（管線正確），但成功率低且不穩。
+
+## 根本原因：定焦鏡頭
+
+- 相機 = **WS-OV5640CSP 定焦版**（AF probe 回 `no FOCUSED — fixed-focus`）。
+- Waveshare OV5640 定焦（Board A/CSP）：焦距 2.8mm、F2.8，對焦在遠處，
+  **近距離掃碼嚴重失焦**。手持晃動使各幀銳利度不一 → 多數幀 candidates=0，
+  偶爾一幀夠銳利才解出。
+- **軟體已正確且盡力**（多幀嘗試 + box average + 多閾值），但無法根治模糊影像。
+- 測試媒介是**手機螢幕**（有摩爾紋+反光），非實際的紙本標籤 —— 待補紙本 A/B 測試。
+
+## 硬體解法：換 AF 版鏡頭
+
+| 項目 | 資訊 |
+|------|------|
+| 產品 | **OV5640 Camera Board (C)** — Auto Focusing, Onboard Flash |
+| SKU | **13802** |
+| 價格 | US $26.99 |
+| 鏡頭 | 焦距 3.37mm(可調)、F2.8、對角 67.4°、板載 flash LED |
+| sensor | OV5640 5MP（與現定焦版**同一顆**）|
+| 尺寸 | 35.7×23.9mm，DVP 8-bit |
+| 產品頁 | waveshare.com/ov5640-camera-board-c.htm |
+
+**韌體已就緒**：AF 觸發資料驅動（`camera_af_is_available()`）。換上 AF 版後，
+開機探測偵測到 `[AF] RESULT: FOCUSED`，`hi-res AF disabled` → `enabled`，
+SVGA 擷取前自動觸發對焦，**不需改程式碼**。
+
+**⚠️ 採購前確認機構相容**：本板為微雪 ESP32-S3-Touch-LCD-2 一體板，相機經 FPC
+排線連接。需確認 (1) 板上相機是可插拔 FPC 模組（非焊死）、(2) Board (C) 排線
+規格（pin 數/間距/方向）與板子相機座相容。建議直接詢問微雪客服。
+
+## 目前互動設計（SCAN 頁）
+
+- 常駐 SVGA 800×600，預覽 4x 降採樣到 200×150 取景框（~4.9 fps）
+- 短按 = 多幀嘗試掃描（最多 8 幀 / 2 秒，任一成功即停）；QR 降採樣到 QVGA 解、
+  1D 全 SVGA 解
+- 長按 = 切模式（QUERY/INPUT/INVENTORY）
+- 長按住 >2s = 回首頁
+- 盤點清單頁入口待重新加入（原長按進入已改為切模式）
