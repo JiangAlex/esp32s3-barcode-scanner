@@ -103,6 +103,59 @@ static void rgb565_to_luma_local(const uint16_t* src, uint8_t* dst, int npx) {
     }
 }
 
+// Measure focus sharpness of a captured RGB565 frame over its center region:
+// the sum of absolute horizontal luma gradients. A sharp image (crisp bar
+// edges) has far more high-frequency energy than a blurred one. Uses the green
+// channel approximation via the high byte for speed. Core 0.
+static uint64_t frame_sharpness(camera_fb_t* fb) {
+    if (!fb || fb->format != PIXFORMAT_RGB565) return 0;
+    const uint16_t* px = (const uint16_t*)fb->buf;
+    int W = fb->width, H = fb->height;
+    // Center ROI: middle 50% horizontally, a few rows around vertical center.
+    int rx0 = W / 4, rx1 = (W * 3) / 4;
+    int ry0 = H / 2 - 20, ry1 = H / 2 + 20;
+    if (ry0 < 0) ry0 = 0; if (ry1 > H) ry1 = H;
+    uint64_t acc = 0;
+    for (int y = ry0; y < ry1; y++) {
+        const uint16_t* row = px + (long)y * W;
+        int prev = -1;
+        for (int x = rx0; x < rx1; x++) {
+            uint16_t p = __builtin_bswap16(row[x]);     // match luma byte order
+            int g = (p >> 5) & 0x3F;                    // green (6 bits), 59% of luma
+            if (prev >= 0) { int d = g - prev; acc += (d < 0 ? -d : d); }
+            prev = g;
+        }
+    }
+    return acc;
+}
+
+// Sweep the VCM across its usable range, measuring sharpness at each step, and
+// park at the sharpest position. Called before a decode attempt so 1D barcodes
+// (which need crisp narrow bars) get the best possible focus. Core 0 — assumes
+// the caller is between fb_get/fb_return (we grab our own frames here).
+static void autofocus_sweep(void) {
+    const uint16_t lo = 80, hi = 600, step = 40;
+    uint16_t best_vcm = camera_af_get_manual();
+    uint64_t best_sharp = 0;
+    Serial.println("[AF] sweep: start");
+    for (uint16_t v = lo; v <= hi; v += step) {
+        camera_af_set_manual(v);
+        delay(60);                        // let VCM settle + sensor expose
+        // Discard one frame (stale), measure the next.
+        camera_fb_t* f = esp_camera_fb_get();
+        if (f) { esp_camera_fb_return(f); }
+        f = esp_camera_fb_get();
+        if (!f) continue;
+        uint64_t s = frame_sharpness(f);
+        esp_camera_fb_return(f);
+        Serial.printf("[AF] sweep: VCM=%u sharp=%llu\n", v, (unsigned long long)s);
+        if (s > best_sharp) { best_sharp = s; best_vcm = v; }
+    }
+    camera_af_set_manual(best_vcm);
+    delay(60);
+    Serial.printf("[AF] sweep: best VCM=%u (sharp=%llu)\n", best_vcm, (unsigned long long)best_sharp);
+}
+
 // Decode the current SVGA frame (already the always-on capture size). No mode
 // switching — the camera is initialized at SVGA, so `fb` is 800x600 RGB565.
 // Converts to luma and runs the full decoder (QR downsampled + 1D full-res).
@@ -207,18 +260,14 @@ static void capture_task(void* param) {
 
         if (s_hires_requested) {
             s_hires_requested = false;
-            // Trigger a single-shot autofocus before the decode window. The
-            // camera is initialized far-focus by default, so close-range label
-            // scanning needs the VCM driven to the near position first. We do
-            // NOT gate this on the boot-time probe result: the probe only tells
-            // us whether AF *worked at boot*, not whether the lens is AF-capable
-            // under current conditions. camera_af_trigger_oneshot() is a no-op
-            // (returns false) on non-OV5640 or if the AF firmware never loaded,
-            // so calling it unconditionally is safe.
+            // Run a sharpness-based VCM autofocus sweep before decoding. The
+            // module's algorithmic AF does not converge, but the VCM moves when
+            // driven directly, so we sweep positions and keep the sharpest. 1D
+            // barcodes especially need crisp narrow bars; this picks the best
+            // focus objectively (no serial tuning / eyeballing needed).
             uint32_t af_t0 = millis();
-            bool af_ok = camera_af_trigger_oneshot();
-            Serial.printf("[PREVIEW] scan: AF %s (%lums)\n",
-                          af_ok ? "locked" : "skipped/failed", millis() - af_t0);
+            autofocus_sweep();
+            Serial.printf("[PREVIEW] scan: AF sweep done (%lums)\n", millis() - af_t0);
             s_attempts_left = HIRES_MAX_ATTEMPTS;
             s_attempt_deadline = millis() + HIRES_MAX_MS;
             Serial.println("[PREVIEW] scan: starting multi-frame attempt");
