@@ -41,7 +41,7 @@ bool camera_init(void) {
     config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     config.fb_location = CAMERA_FB_IN_PSRAM;  // PSRAM now enabled (qio_opi)
     config.jpeg_quality = CAM_JPEG_QUALITY;
-    config.fb_count = 2;                       // Double buffer (PSRAM available)
+    config.fb_count = CAM_FB_COUNT;            // from config.h (1 for UXGA)
 
     // Initialize camera
     esp_err_t err = esp_camera_init(&config);

@@ -356,13 +356,13 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
         {
             const uint8_t* row = luma + (long)(h/2) * w;
             // adaptive threshold identical to bc1d_decode_line
-            static int32_t pre[801];
-            int ww = (w > 800) ? 800 : w;
+            static int32_t pre[1665];
+            int ww = (w > 1664) ? 1664 : w;
             pre[0] = 0;
             for (int x = 0; x < ww; x++) pre[x+1] = pre[x] + row[x];
             int win = ww / 20; if (win < 7) win = 7;
             // find first bar, then collect runs
-            static bool bits[801];
+            static bool bits[1664];
             for (int x = 0; x < ww; x++) {
                 int a = x - win; if (a < 0) a = 0;
                 int b = x + win; if (b > ww-1) b = ww-1;
