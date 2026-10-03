@@ -213,7 +213,10 @@ void setup() {
     Serial.flush();
 
     Wire.begin(I2C_SHARED_SDA, I2C_SHARED_SCL);
-    Wire.setClock(400000);
+    // Shared bus (touch CST816 + IMU QMI8658) was unreliable at 400 kHz —
+    // QMI8658 ID read returned 0x00 (should be 0x05) and CST816 never showed
+    // on a scan. I2C_FREQ lowered to 100 kHz (pinout.h) for tolerance.
+    Wire.setClock(I2C_FREQ);
     i2c_scan();
 
     init_qmi8658();

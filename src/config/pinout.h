@@ -80,7 +80,7 @@
 
 #define I2C_SHARED_SDA      48
 #define I2C_SHARED_SCL      47
-#define I2C_FREQ            400000      // 400kHz
+#define I2C_FREQ            100000      // 100kHz (shared bus: CST816 + QMI8658; 400k was unreliable)
 
 // ─── Touch CST816D (I2C — shares bus above) ─────────────────────────────────
 
