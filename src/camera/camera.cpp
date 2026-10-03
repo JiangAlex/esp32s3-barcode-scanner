@@ -323,17 +323,35 @@ bool camera_af_is_available(void) {
     return s_af_available;
 }
 
+// Directly command the VCM to an absolute position, bypassing the AF MCU
+// algorithm entirely. value range ~0..1023 (usable ~100..900): small = near
+// focus, large = far/infinity. This is the decisive test for whether the lens
+// actuator physically moves: if a sweep changes the preview sharpness, the VCM
+// is alive and only the AF *algorithm* was failing; if nothing changes across
+// the whole range, the VCM is not being driven (hardware: FPC/VCM power).
+static void af_set_vcm_manual(sensor_t* s, uint16_t vcm) {
+    s->set_reg(s, 0x3022, 0x00, 0xff);                 // manual focus mode
+    s->set_reg(s, 0x3023, (vcm >> 8) & 0x03, 0xff);    // position high bits
+    s->set_reg(s, 0x3024, vcm & 0xff, 0xff);           // position low byte
+}
+
 bool camera_af_trigger_oneshot(void) {
     sensor_t* s = esp_camera_sensor_get();
     if (!s || s->id.PID != OV5640_PID || !s_af_loaded) return false;
 
-    // Continuous-AF focus (see af_run_focus). The preamble (MAIN 0x01→0x08 +
-    // ack wait) is mandatory. We wait up to the timeout for FOCUSED; a short
-    // settle is unnecessary since reaching FOCUSED already means the VCM
-    // converged, but keep a tiny margin.
-    bool ok = af_run_focus(s, 1500);
-    if (ok) delay(30);
-    return ok;
+    // DIAGNOSTIC MODE: manual VCM sweep. Drives the motor to near / mid / far
+    // so the preview can be watched for any focus change. Replaces the
+    // algorithmic focus temporarily to isolate motor vs. algorithm.
+    const uint16_t positions[] = { 100, 300, 500, 700, 900 };
+    for (size_t i = 0; i < sizeof(positions)/sizeof(positions[0]); i++) {
+        af_set_vcm_manual(s, positions[i]);
+        Serial.printf("[AF] manual VCM=%u — watch preview for focus change\n", positions[i]);
+        delay(700);
+    }
+    // Leave the lens at a near position (good for close-range label scanning).
+    af_set_vcm_manual(s, 200);
+    Serial.println("[AF] manual sweep done, parked at VCM=200 (near)");
+    return true;
 }
 
 bool camera_set_rgb565_svga(void) {
