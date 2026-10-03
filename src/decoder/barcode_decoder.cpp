@@ -347,6 +347,27 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
     {
         bc1d_result_t r1d;
         int n_lines = (h >= 480) ? 25 : 15;
+
+        // DIAGNOSTIC: sample a few scanlines' contrast across the vertical
+        // extent. bc1d_decode_line requires (hi-lo) >= 40 to proceed, so if the
+        // bars aren't being hit or contrast is low, log it. Reports min/max of
+        // the center row and how many of n_lines pass the contrast gate.
+        {
+            int pass = 0, cmin = 255, cmax = 0;
+            for (int i = 0; i < n_lines; i++) {
+                int y = (int)(((long)(i + 1) * h) / (n_lines + 1));
+                const uint8_t* row = luma + (long)y * w;
+                uint8_t lo = 255, hi = 0;
+                for (int x = 0; x < w; x++) { uint8_t v = row[x]; if (v < lo) lo = v; if (v > hi) hi = v; }
+                int c = hi - lo;
+                if (c >= 40) pass++;
+                int yc = h / 2;
+                if (y == yc || (i == n_lines/2)) { cmin = lo; cmax = hi; }
+            }
+            Serial.printf("[DECODE] 1D diag: %dx%d lines=%d contrast_ok=%d center[min=%d max=%d]\n",
+                          w, h, n_lines, pass, cmin, cmax);
+        }
+
         if (bc1d_decode_image(luma, w, h, w, n_lines, &r1d)) {
             result.success = true;
             result.content = String(r1d.text);
