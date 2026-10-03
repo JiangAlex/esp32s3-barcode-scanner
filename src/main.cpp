@@ -312,6 +312,44 @@ void setup() {
 }
 
 void loop() {
+    // ── Serial VCM focus tuning (for finding the sharpest manual focus for 1D
+    //    barcodes, which need crisp narrow bars) ───────────────────────────
+    //   '+' / '='  : focus nearer (VCM += 10)
+    //   '-'        : focus farther (VCM -= 10)
+    //   digits + Enter (e.g. "300\n") : set VCM to that absolute value
+    //   'p'        : print current VCM
+    // Aim at a 1D barcode at the scan distance and tune until the preview's
+    // narrow bars are individually crisp; note the VCM value.
+    {
+        static int  s_num = -1;             // accumulating numeric entry
+        while (Serial.available() > 0) {
+            char c = (char)Serial.read();
+            if (c >= '0' && c <= '9') {
+                if (s_num < 0) s_num = 0;
+                s_num = s_num * 10 + (c - '0');
+                if (s_num > 1023) s_num = 1023;
+            } else if (c == '\n' || c == '\r') {
+                if (s_num >= 0) {
+                    camera_af_set_manual((uint16_t)s_num);
+                    Serial.printf("[FOCUS] VCM=%u (set)\n", (unsigned)s_num);
+                    s_num = -1;
+                }
+            } else if (c == '+' || c == '=') {
+                uint16_t v = camera_af_get_manual();
+                v = (v > 1013) ? 1023 : v + 10;
+                camera_af_set_manual(v);
+                Serial.printf("[FOCUS] VCM=%u (nearer)\n", v);
+            } else if (c == '-') {
+                uint16_t v = camera_af_get_manual();
+                v = (v < 10) ? 0 : v - 10;
+                camera_af_set_manual(v);
+                Serial.printf("[FOCUS] VCM=%u (farther)\n", v);
+            } else if (c == 'p') {
+                Serial.printf("[FOCUS] current VCM=%u\n", camera_af_get_manual());
+            }
+        }
+    }
+
     // Poll BOOT button (active LOW, pull-up so default HIGH)
     static bool     g_btn_was_pressed = false;
     static uint32_t g_btn_press_ms   = 0;
