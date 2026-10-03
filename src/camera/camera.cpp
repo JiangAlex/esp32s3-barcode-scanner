@@ -167,6 +167,34 @@ static bool af_wait_fw_idle(sensor_t* s, uint32_t timeout_ms) {
     return false;
 }
 
+// Wait for the AF MCU to clear CMD_ACK (0x3023) back to 0x00, which signals the
+// previously issued command has been consumed/completed.
+static bool af_wait_ack_clear(sensor_t* s, uint32_t timeout_ms) {
+    uint32_t start = millis();
+    while ((millis() - start) < timeout_ms) {
+        if (af_reg_read(s, OV5640_CMD_ACK) == 0x00) return true;
+        delay(5);
+    }
+    return false;
+}
+
+// Run one single-shot autofocus using the full handshake from the official
+// esp32-camera ov5640_af.c (ov5640_af_start). The critical part we were
+// missing before: the AF loop must first be prepared with MAIN=0x01 then
+// MAIN=0x08 and an ack-clear wait, BEFORE issuing the actual focus command.
+// Without that preamble the MCU never consumes the command and CMD_ACK stays
+// stuck at 0x01 (observed on-device as "command not acked within timeout").
+// Returns true if both the preamble and the focus command were acked.
+static bool af_run_single_focus(sensor_t* s, uint32_t timeout_ms) {
+    af_reg_write(s, OV5640_CMD_MAIN, 0x01);          // prepare
+    af_reg_write(s, OV5640_CMD_MAIN, 0x08);          // pause/release AF loop
+    if (!af_wait_ack_clear(s, timeout_ms)) return false;
+
+    af_reg_write(s, OV5640_CMD_ACK, 0x01);           // mark command pending
+    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_TRIG_SINGLE);  // single-shot AF
+    return af_wait_ack_clear(s, timeout_ms);         // completed when ack→0
+}
+
 bool camera_af_probe(void) {
     sensor_t* s = esp_camera_sensor_get();
     if (!s) { Serial.println("[AF] no sensor handle"); return false; }
@@ -200,49 +228,18 @@ bool camera_af_probe(void) {
     s_af_loaded = true;
     Serial.println("[AF] firmware loaded, MCU IDLE. Triggering single-shot focus...");
 
-    // Fire a single-shot focus and wait for completion.
-    //
-    // Correct OV5640 AF command protocol (per the AF MCU firmware spec):
-    //   1. host writes CMD_ACK (0x3023) = 0x01   — "a command is pending"
-    //   2. host writes CMD_MAIN (0x3022) = cmd   — the actual command (0x03 = single AF)
-    //   3. the AF MCU clears CMD_ACK back to 0x00 when the command COMPLETES.
-    // So the completion signal is CMD_ACK → 0x00, NOT a specific fw_status value.
-    //
-    // fw_status meanings while this runs:
-    //   0x00 = S_FOCUSING (actively driving the VCM — proves the lens is AF),
-    //   0x10 = S_FOCUSED  (continuous-focus steady state, cmd 0x04),
-    //   0x70 = S_IDLE     (firmware idle after a single-shot finishes).
-    // The previous code waited for 0x10, which single-shot (0x03) never reaches,
-    // so an AF lens was mis-detected as fixed-focus. We now key off CMD_ACK and
-    // treat observing S_FOCUSING (0x00) as proof the VCM is being driven.
-    af_reg_write(s, OV5640_CMD_ACK, 0x01);
-    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_TRIG_SINGLE);
+    // Run a single-shot focus with the full official handshake (see
+    // af_run_single_focus). Completion is signaled by CMD_ACK returning to
+    // 0x00. We then read fw_status: 0x10 (FOCUSED) means the search converged;
+    // a successful ack on a fixed-focus module is unlikely since the handshake
+    // depends on the AF MCU firmware driving the VCM loop.
+    bool acked = af_run_single_focus(s, 3000);
+    int st_final = af_reg_read(s, OV5640_CMD_FW_STATUS);
+    Serial.printf("[AF] after focus: acked=%d fw_status=0x%02x\n", acked ? 1 : 0, st_final);
 
-    uint32_t start = millis();
-    int last_st = -1, last_ack = -1;
-    bool saw_focusing = false;   // observed fw_status 0x00 → VCM is moving
-    bool ack_cleared  = false;   // command completed
-    while ((millis() - start) < 3000) {
-        int st  = af_reg_read(s, OV5640_CMD_FW_STATUS);
-        int ack = af_reg_read(s, OV5640_CMD_ACK);
-        if (st != last_st || ack != last_ack) {
-            Serial.printf("[AF] fw_status=0x%02x ack=0x%02x\n", st, ack);
-            last_st = st; last_ack = ack;
-        }
-        if (st == OV5640_FW_STATUS_S_FOCUSING || st == OV5640_FW_STATUS_FOCUSED) {
-            saw_focusing = true;
-        }
-        if (ack == 0x00) { ack_cleared = true; break; }  // command completed
-        delay(20);
-    }
-
-    // AF confirmed if the firmware acknowledged the single-shot command AND we
-    // saw the VCM driving (focusing/focused). A fixed-focus module's MCU never
-    // enters the focusing state.
-    bool af_ok = ack_cleared && saw_focusing;
+    bool af_ok = acked;
     if (af_ok) Serial.println("[AF] RESULT: single-shot AF completed — AF-capable module confirmed");
-    else if (ack_cleared) Serial.println("[AF] RESULT: command acked but no focusing state — likely fixed-focus lens");
-    else Serial.println("[AF] RESULT: command not acked within timeout — AF MCU not responding");
+    else       Serial.println("[AF] RESULT: focus command not acked — likely fixed-focus lens or AF MCU not running");
     s_af_available = af_ok;
     return true;   // firmware path worked; focus outcome logged above
 }
@@ -255,21 +252,13 @@ bool camera_af_trigger_oneshot(void) {
     sensor_t* s = esp_camera_sensor_get();
     if (!s || s->id.PID != OV5640_PID || !s_af_loaded) return false;
 
-    // Same protocol as the probe: ACK=0x01, MAIN=0x03, then wait for the AF MCU
-    // to clear ACK back to 0x00 (command complete). Keying off ACK — not a
-    // specific fw_status — is what makes single-shot focus work reliably.
-    af_reg_write(s, OV5640_CMD_ACK, 0x01);
-    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_TRIG_SINGLE);
-
-    uint32_t start = millis();
-    while ((millis() - start) < 1500) {
-        if (af_reg_read(s, OV5640_CMD_ACK) == 0x00) {
-            delay(50);   // let the VCM settle after the focus completes
-            return true;
-        }
-        delay(15);
-    }
-    return false;
+    // Full handshake (same as probe). The preamble (MAIN 0x01→0x08 + ack wait)
+    // is mandatory; skipping it leaves CMD_ACK stuck at 0x01 and the lens never
+    // moves. On success, give the VCM a moment to settle before the caller
+    // captures a frame.
+    bool ok = af_run_single_focus(s, 1500);
+    if (ok) delay(50);
+    return ok;
 }
 
 bool camera_set_rgb565_svga(void) {
