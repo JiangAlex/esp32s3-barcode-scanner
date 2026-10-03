@@ -348,37 +348,37 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
         bc1d_result_t r1d;
         int n_lines = (h >= 480) ? 25 : 15;
 
-        // DIAGNOSTIC: sample a few scanlines' contrast across the vertical
-        // extent. bc1d_decode_line requires (hi-lo) >= 40 to proceed, so if the
-        // bars aren't being hit or contrast is low, log it. Reports min/max of
-        // the center row and how many of n_lines pass the contrast gate.
+        // DIAGNOSTIC: dump the center scanline's run-lengths using the SAME
+        // adaptive binarization the decoder uses. Code128 Start-B is modules
+        // 2-1-1-2-1-4; seeing the first bar-run cluster lets us tell whether
+        // the run pattern is even recoverable (image/sampling) or the decode
+        // logic is the problem. Print the first ~28 runs.
         {
-            int pass = 0, cmin = 255, cmax = 0;
-            for (int i = 0; i < n_lines; i++) {
-                int y = (int)(((long)(i + 1) * h) / (n_lines + 1));
-                const uint8_t* row = luma + (long)y * w;
-                uint8_t lo = 255, hi = 0;
-                for (int x = 0; x < w; x++) { uint8_t v = row[x]; if (v < lo) lo = v; if (v > hi) hi = v; }
-                int c = hi - lo;
-                if (c >= 40) pass++;
-                int yc = h / 2;
-                if (y == yc || (i == n_lines/2)) { cmin = lo; cmax = hi; }
+            const uint8_t* row = luma + (long)(h/2) * w;
+            // adaptive threshold identical to bc1d_decode_line
+            static int32_t pre[801];
+            int ww = (w > 800) ? 800 : w;
+            pre[0] = 0;
+            for (int x = 0; x < ww; x++) pre[x+1] = pre[x] + row[x];
+            int win = ww / 20; if (win < 7) win = 7;
+            // find first bar, then collect runs
+            static bool bits[801];
+            for (int x = 0; x < ww; x++) {
+                int a = x - win; if (a < 0) a = 0;
+                int b = x + win; if (b > ww-1) b = ww-1;
+                int mean = (pre[b+1] - pre[a]) / (b - a + 1);
+                bits[x] = (row[x] < mean - 8);
             }
-            // On the center row, binarize at mid-threshold and report the span
-            // between the first and last dark pixel (what the EAN/128 decoders
-            // use as the symbol extent). If this span ~= w, the barcode extent
-            // is contaminated by background darks on the sides → decode fails.
-            {
-                const uint8_t* row = luma + (long)(h/2) * w;
-                int th = (cmin + cmax) / 2;
-                int fb = -1, lb = -1, dark = 0;
-                for (int x = 0; x < w; x++) {
-                    if (row[x] < th) { if (fb < 0) fb = x; lb = x; dark++; }
-                }
-                int span = (fb >= 0) ? (lb - fb + 1) : 0;
-                Serial.printf("[DECODE] 1D diag: %dx%d lines=%d contrast_ok=%d center[min=%d max=%d] span[first=%d last=%d w=%d dark=%d]\n",
-                              w, h, n_lines, pass, cmin, cmax, fb, lb, span, dark);
+            int x = 0; while (x < ww && !bits[x]) x++;
+            int first = x;
+            int runs[40]; int nr = 0; bool cur = true; int len = 0;
+            for (; x < ww; x++) {
+                if (bits[x] == cur) len++;
+                else { if (nr < 40) runs[nr++] = len; else break; cur = bits[x]; len = 1; }
             }
+            Serial.printf("[DECODE] 1D diag: w=%d first_bar=%d nruns=%d runs:", ww, first, nr);
+            for (int k = 0; k < nr && k < 28; k++) Serial.printf(" %d", runs[k]);
+            Serial.println();
         }
 
         if (bc1d_decode_image(luma, w, h, w, n_lines, &r1d)) {
