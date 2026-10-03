@@ -23,6 +23,7 @@
 #include "storage/nvs_settings.h"
 #include "power.h"
 #include "camera/camera.h"
+#include "input/touch.h"
 
 // ─── I2C ────────────────────────────────────────────────────────────────────
 
@@ -325,6 +326,17 @@ void setup() {
 }
 
 void loop() {
+    // Directly poll the touch controller here so the address probe runs even
+    // though LVGL's indev path is tangled (two disp registrations; touch indev
+    // commented out). This confirms the touch hardware (0x15 vs 0x7E) from the
+    // serial log independent of LVGL. Rate-limit to ~50 Hz.
+    {
+        static uint32_t s_last_touch_poll = 0;
+        if (millis() - s_last_touch_poll >= 20) {
+            s_last_touch_poll = millis();
+            touch_read();
+        }
+    }
     // ── Serial focus calibration ─────────────────────────────────────────
     // This FD5640 module's algorithmic AF does not converge, so focus is a
     // fixed manual VCM position (default 120, near-focus). These serial
