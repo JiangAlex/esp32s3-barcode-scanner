@@ -175,41 +175,24 @@ static int c128_match6(const int* w6) {
     return -1;
 }
 
-// Decode Code128 from binarized bits (true=bar). Fills out->text on success.
-static bool decode_code128_bits(const bool* bits, int n, bc1d_result_t* out) {
-    // Extract run-lengths (alternating). Skip leading quiet zone (spaces).
-    int i = 0;
-    while (i < n && !bits[i]) i++;            // skip to first bar
-    if (i >= n) return false;
-    int startpos = i;
+// Try to decode a Code128 symbol from the run-length array starting at run
+// offset `off` (which must index a bar run). Returns true on a checksum-valid
+// decode. Factored out so the caller can try multiple start offsets — real
+// camera rows often have spurious leading bars (noise, label edges) before the
+// true Start character, which a fixed "from the first bar" parse can't skip.
+static bool c128_try_from(const int* runs, int nr, int off, bc1d_result_t* out) {
+    if (off + 19 > nr) return false;          // need start+data+checksum+stop
 
-    // Collect runs from the first bar.
-    int runs[512];
-    int nr = 0;
-    bool cur = true;                          // first run is a bar
-    int len = 0;
-    for (int x = startpos; x < n; x++) {
-        if (bits[x] == cur) { len++; }
-        else { if (nr < 512) runs[nr++] = len; else break; cur = bits[x]; len = 1; }
-    }
-    if (len > 0 && nr < 512) runs[nr++] = len;
-
-    // Need at least start(6) + checksum(6) + stop(7) = 19 runs.
-    if (nr < 19) return false;
-
-    // Estimate module width from the first 6 elements (start char = 11 modules).
+    // Module width from the start char (6 elements = 11 modules).
     int sum6 = 0;
-    for (int k = 0; k < 6; k++) sum6 += runs[k];
+    for (int k = 0; k < 6; k++) sum6 += runs[off + k];
     float module = (float)sum6 / 11.0f;
     if (module < 0.8f) return false;
 
-    // Helper: normalize 6 runs at offset to module counts (each clamped 1..4).
-    // Returns false if the group doesn't total 11 modules.
-    int pos = 0;
     int values[64];
     int nvals = 0;
+    int pos = off;
 
-    // Parse symbols until we hit Stop.
     while (pos + 6 <= nr) {
         // Check for Stop (7 elements) first when enough runs remain.
         if (pos + 7 <= nr) {
@@ -223,7 +206,7 @@ static bool decode_code128_bits(const bool* bits, int n, bc1d_result_t* out) {
             if (s7 == 13) {
                 bool stop = true;
                 for (int k = 0; k < 7; k++) if ((C128[C128_STOP][k] - '0') != w7[k]) { stop = false; break; }
-                if (stop) { break; }        // reached Stop
+                if (stop) break;              // reached Stop
             }
         }
         int w6[6];
@@ -243,23 +226,20 @@ static bool decode_code128_bits(const bool* bits, int n, bc1d_result_t* out) {
         module = (module * 3.0f + (float)s / 11.0f) / 4.0f;
     }
 
-    // Need at least start + 1 data + checksum.
-    if (nvals < 3) return false;
+    if (nvals < 3) return false;              // start + 1 data + checksum
 
     int start_val = values[0];
     if (start_val != C128_START_A && start_val != C128_START_B && start_val != C128_START_C)
         return false;
 
-    // Checksum: last data value is the check digit.
     int check = values[nvals - 1];
     long sum = start_val;
     for (int k = 1; k < nvals - 1; k++) sum += (long)values[k] * k;
     if ((int)(sum % 103) != check) return false;
 
-    // Decode values (excluding start and checksum) per code set, with switches.
     char text[48];
     int tlen = 0;
-    int set = (start_val == C128_START_A) ? 0 : (start_val == C128_START_B) ? 1 : 2; // A,B,C
+    int set = (start_val == C128_START_A) ? 0 : (start_val == C128_START_B) ? 1 : 2;
 
     for (int k = 1; k < nvals - 1; k++) {
         int v = values[k];
@@ -271,8 +251,6 @@ static bool decode_code128_bits(const bool* bits, int n, bc1d_result_t* out) {
             else { /* FNC/shift: ignore */ }
         } else {                              // Code A or B
             if (v < 96) {
-                // Value→ASCII: Code B v0..95 → ' '..'~' (32..127). Code A similar
-                // but 64..95 map to control; for product labels treat as B-style.
                 char c = (char)(v + 32);
                 if (tlen + 1 < 48) text[tlen++] = c;
             } else if (v == 99) { set = 2; }   // Code C
@@ -289,6 +267,37 @@ static bool decode_code128_bits(const bool* bits, int n, bc1d_result_t* out) {
     out->length = tlen;
     out->ok = true;
     return true;
+}
+
+// Decode Code128 from binarized bits (true=bar). Fills out->text on success.
+static bool decode_code128_bits(const bool* bits, int n, bc1d_result_t* out) {
+    // Extract run-lengths (alternating), starting from the first bar.
+    int i = 0;
+    while (i < n && !bits[i]) i++;            // skip to first bar
+    if (i >= n) return false;
+    int startpos = i;
+
+    int runs[512];
+    int nr = 0;
+    bool cur = true;                          // first run is a bar
+    int len = 0;
+    for (int x = startpos; x < n; x++) {
+        if (bits[x] == cur) { len++; }
+        else { if (nr < 512) runs[nr++] = len; else break; cur = bits[x]; len = 1; }
+    }
+    if (len > 0 && nr < 512) runs[nr++] = len;
+
+    if (nr < 19) return false;
+
+    // Try multiple start offsets. runs[0] is a bar; the Start character also
+    // begins with a bar, so candidate offsets are even indices. Spurious
+    // leading bars (noise/label edge) shift the true Start to a later even
+    // offset — scan a bounded number of them and return the first valid decode.
+    const int MAX_START_OFFSETS = 16;         // bounded effort
+    for (int off = 0; off + 19 <= nr && off <= MAX_START_OFFSETS * 2; off += 2) {
+        if (c128_try_from(runs, nr, off, out)) return true;
+    }
+    return false;
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -335,9 +344,10 @@ bool bc1d_decode_line(const uint8_t* luma, int width, bc1d_result_t* out) {
             int b = i + win; if (b > width - 1) b = width - 1;
             int cnt = b - a + 1;
             int mean = (s_pre[b + 1] - s_pre[a]) / cnt;
-            // Bar if darker than local mean by a small bias (reduces noise in
-            // flat regions turning into spurious bars).
-            s_bits[i] = (luma[i] < mean - 4);
+            // Bar if darker than local mean by a bias. A larger bias avoids
+            // flat white quiet-zone noise being turned into spurious bars
+            // (which shifted the detected span and the Code128 start offset).
+            s_bits[i] = (luma[i] < mean - 8);
         }
     }
 
