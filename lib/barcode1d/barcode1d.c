@@ -161,18 +161,43 @@ static const char* C128[107] = {
 #define C128_START_C 105
 #define C128_STOP    106
 
-// Match 6 element widths (module counts) against the 6-element patterns.
-// Returns symbol value 0..105, or -1.
-static int c128_match6(const int* w6) {
-    for (int v = 0; v < 106; v++) {          // 0..105 are 6-element patterns
-        const char* p = C128[v];
-        bool ok = true;
-        for (int k = 0; k < 6; k++) {
-            if ((p[k] - '0') != w6[k]) { ok = false; break; }
-        }
-        if (ok) return v;
+// ZXing-style pattern match by normalized variance (Code128Reader).
+//
+// Our old approach quantized each run to an integer module count (run/module),
+// which is brittle on camera images: uneven run widths + a slightly-off module
+// estimate flips the quantization and the pattern never matches. ZXing instead
+// compares the RAW counters to each candidate pattern by scaling the pattern to
+// the counters' total and measuring per-element variance — tolerant of width
+// jitter. Returns the sum-variance (lower = better); large value = no match.
+#define C128_MAX_INDIVIDUAL_VARIANCE_NUM 7   // 0.7 as 7/10
+#define C128_MAX_INDIVIDUAL_VARIANCE_DEN 10
+static float c128_pattern_variance(const int* counters, const char* pattern, int nelem) {
+    int total = 0, patternTotal = 0;
+    for (int i = 0; i < nelem; i++) { total += counters[i]; patternTotal += (pattern[i] - '0'); }
+    if (total < patternTotal) return 1e9f;   // not enough pixels; can't match
+    float unit = (float)total / (float)patternTotal;
+    float maxIndividual = unit * C128_MAX_INDIVIDUAL_VARIANCE_NUM / C128_MAX_INDIVIDUAL_VARIANCE_DEN;
+    float totalVariance = 0.0f;
+    for (int i = 0; i < nelem; i++) {
+        int c = counters[i];
+        float scaled = (pattern[i] - '0') * unit;
+        float diff = (c > scaled) ? (c - scaled) : (scaled - c);
+        if (diff > maxIndividual) return 1e9f;
+        totalVariance += diff;
     }
-    return -1;
+    return totalVariance / (float)total;
+}
+
+// Match 6 raw run counters against the 6-element patterns by best variance.
+// Returns symbol value 0..105 or -1. MAX_AVG_VARIANCE = 0.25 (ZXing).
+static int c128_match6_var(const int* c6) {
+    float best = 0.25f;   // MAX_AVG_VARIANCE
+    int bestv = -1;
+    for (int v = 0; v < 106; v++) {
+        float var = c128_pattern_variance(c6, C128[v], 6);
+        if (var < best) { best = var; bestv = v; }
+    }
+    return bestv;
 }
 
 // Try to decode a Code128 symbol from the run-length array starting at run
@@ -183,47 +208,27 @@ static int c128_match6(const int* w6) {
 static bool c128_try_from(const int* runs, int nr, int off, bc1d_result_t* out) {
     if (off + 19 > nr) return false;          // need start+data+checksum+stop
 
-    // Module width from the start char (6 elements = 11 modules).
-    int sum6 = 0;
-    for (int k = 0; k < 6; k++) sum6 += runs[off + k];
-    float module = (float)sum6 / 11.0f;
-    if (module < 0.8f) return false;
+    // Sanity: the start char must itself match a Start pattern by variance.
+    {
+        int sv = c128_match6_var(&runs[off]);
+        if (sv != C128_START_A && sv != C128_START_B && sv != C128_START_C) return false;
+    }
 
     int values[64];
     int nvals = 0;
     int pos = off;
 
     while (pos + 6 <= nr) {
-        // Check for Stop (7 elements) first when enough runs remain.
+        // Check for Stop (7 elements) first when enough runs remain. Match the
+        // 7-element Stop pattern directly by variance on the raw counters.
         if (pos + 7 <= nr) {
-            int w7[7], s7 = 0;
-            for (int k = 0; k < 7; k++) {
-                int c = (int)((float)runs[pos + k] / module + 0.5f);
-                if (c < 1) c = 1;
-                if (c > 4) c = 4;
-                w7[k] = c; s7 += c;
-            }
-            if (s7 == 13) {
-                bool stop = true;
-                for (int k = 0; k < 7; k++) if ((C128[C128_STOP][k] - '0') != w7[k]) { stop = false; break; }
-                if (stop) break;              // reached Stop
-            }
+            float sv = c128_pattern_variance(&runs[pos], C128[C128_STOP], 7);
+            if (sv < 0.25f) break;            // reached Stop
         }
-        int w6[6];
-        for (int k = 0; k < 6; k++) {
-            int c = (int)((float)runs[pos + k] / module + 0.5f);
-            if (c < 1) c = 1;
-            if (c > 4) c = 4;
-            w6[k] = c;
-        }
-        int v = c128_match6(w6);
+        int v = c128_match6_var(&runs[pos]);
         if (v < 0) return false;
         if (nvals < 64) values[nvals++] = v; else return false;
         pos += 6;
-
-        // Re-estimate module from this symbol (adaptive to width drift).
-        int s = 0; for (int k = 0; k < 6; k++) s += runs[pos - 6 + k];
-        module = (module * 3.0f + (float)s / 11.0f) / 4.0f;
     }
 
     if (nvals < 3) return false;              // start + 1 data + checksum
