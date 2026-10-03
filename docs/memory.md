@@ -508,3 +508,20 @@ otitbridge/m5stick-s3-qr-phomemo),ESP32 只讀結果。→ ESP32+相機純軟體
 ## 最終 build
 
 RAM 43.5% (142412 / 327680)、Flash 24.3% (763941 / 3145728)。host 1D 測試 24/24。
+
+
+## 1D 補救方案 — 專用解碼模組(建議,業界做法)
+
+純軟體 1D 受鏡頭光學限,業界標準是加「掃描頭+解碼晶片」模組,ESP32 只讀結果字串。候選:
+
+| 模組 | 晶片 | 介面 | 碼別 | 備註 |
+|------|------|------|------|------|
+| **M5Stack Unit QRCode**(U173) | STM32F030 + 640×480 CMOS | I2C / UART(側邊開關切) | 1D(EAN/UPC/Code128/Code39)+2D(QR/DM) | 官方 lib `M5Unit-QRCode`;部分版本僅 UART |
+| M5Stack Atomic QRCode2 Base | 同系 | 僅 UART | 同上 | 新一代 |
+| GM65 / GM805(淘寶通用) | — | UART | 1D/2D | 便宜,協定簡單,無品牌 lib |
+
+- 文件:docs.m5stack.com/en/unit/Unit-QRCode;datasheet mouser.com/datasheet/2/1117/Unit_QRCode-3693695.pdf
+- 參考實作:GitHub `otitbridge/m5stick-s3-qr-phomemo`(ESP32-S3 + Unit QRCode,TRIG 觸發讀結果)
+- **整合建議**:用 **UART**(僅佔 2 支 GPIO,避開已被 OV5640 相機/SD/觸控佔用的 I2C bus:
+  0x6B QMI8658、GT911 等)。讀回字串直接餵現有 `scan_preview_set_decode_cb`。
+- 架構:主 OV5640 維持 QR + 拍照 AI;Unit QRCode 專職 1D(及高可靠度 2D)。
