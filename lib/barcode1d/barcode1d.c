@@ -300,20 +300,46 @@ bool bc1d_decode_line(const uint8_t* luma, int width, bc1d_result_t* out) {
     out->text[0] = '\0';
     out->length = 0;
 
-    // Binarize using the global mid-threshold from min/max.
+    // Reject rows with too little overall contrast.
     uint8_t lo = 255, hi = 0;
     for (int i = 0; i < width; i++) {
         if (luma[i] < lo) lo = luma[i];
         if (luma[i] > hi) hi = luma[i];
     }
     if (hi - lo < 40) return false;         // too little contrast
-    uint8_t th = (uint8_t)((lo + hi) / 2);
 
     // Stack buffer for the binarized row. Cap at a sane max to bound stack use;
     // callers feed a single row (<= ~1024 px for our SVGA use).
     static bool s_bits[1024];
     if (width > 1024) width = 1024;
-    for (int i = 0; i < width; i++) s_bits[i] = (luma[i] < th);   // true = bar
+
+    // Local adaptive binarization (moving-average threshold).
+    //
+    // A single global mid-threshold fails on real camera rows: uneven lighting
+    // makes narrow 1-module bars in a darker region fall above the global
+    // midpoint and read as white, corrupting the run-lengths (observed: dark
+    // pixels only ~30% of the symbol span, Code128 start pattern never matches).
+    // Instead, threshold each pixel against the mean of a window around it; a
+    // pixel is a bar if it is sufficiently darker than its local neighborhood.
+    // Window ~= several modules wide so it averages across bars+spaces.
+    {
+        // Prefix sums for O(1) window means. int32 is plenty (255 * 1024).
+        static int32_t s_pre[1025];
+        s_pre[0] = 0;
+        for (int i = 0; i < width; i++) s_pre[i + 1] = s_pre[i] + luma[i];
+
+        int win = width / 20;            // ~5% of row ≈ several modules
+        if (win < 7) win = 7;
+        for (int i = 0; i < width; i++) {
+            int a = i - win; if (a < 0) a = 0;
+            int b = i + win; if (b > width - 1) b = width - 1;
+            int cnt = b - a + 1;
+            int mean = (s_pre[b + 1] - s_pre[a]) / cnt;
+            // Bar if darker than local mean by a small bias (reduces noise in
+            // flat regions turning into spurious bars).
+            s_bits[i] = (luma[i] < mean - 4);
+        }
+    }
 
     int digits[13];
 
