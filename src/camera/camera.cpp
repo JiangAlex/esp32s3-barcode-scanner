@@ -142,6 +142,7 @@ camera_fb_t* camera_capture_jpeg(void) {
 #define OV5640_CMD_FW_STATUS  0x3029
 
 #define OV5640_AF_TRIG_SINGLE 0x03
+#define OV5640_AF_CONTINUOUS  0x04
 #define OV5640_FW_STATUS_IDLE    0x70
 #define OV5640_FW_STATUS_FOCUSED 0x10
 #define OV5640_FW_STATUS_S_FOCUSING 0x00   // running
@@ -182,17 +183,32 @@ static bool af_wait_ack_clear(sensor_t* s, uint32_t timeout_ms) {
 // esp32-camera ov5640_af.c (ov5640_af_start). The critical part we were
 // missing before: the AF loop must first be prepared with MAIN=0x01 then
 // MAIN=0x08 and an ack-clear wait, BEFORE issuing the actual focus command.
-// Without that preamble the MCU never consumes the command and CMD_ACK stays
-// stuck at 0x01 (observed on-device as "command not acked within timeout").
-// Returns true if both the preamble and the focus command were acked.
-static bool af_run_single_focus(sensor_t* s, uint32_t timeout_ms) {
+//
+// On-device finding (2026-10-03): the preamble (0x01/0x08) acks fine, but the
+// single-shot command (0x03) never completes — fw_status enters S_FOCUSING
+// (0x00) and never converges, so ack is never cleared. This matches OV5640 AF
+// modules whose single-trigger search is unreliable. Continuous AF (0x04) is
+// more robust: it keeps driving the VCM and settles to S_FOCUSED (0x10). The
+// official ov5640_af_set_mode(AUTO) also uses 0x04. We therefore start
+// continuous AF and wait for FOCUSED instead of relying on ack-clear for 0x03.
+// Returns true if the lens reached FOCUSED (0x10).
+static bool af_run_focus(sensor_t* s, uint32_t timeout_ms) {
     af_reg_write(s, OV5640_CMD_MAIN, 0x01);          // prepare
     af_reg_write(s, OV5640_CMD_MAIN, 0x08);          // pause/release AF loop
     if (!af_wait_ack_clear(s, timeout_ms)) return false;
 
     af_reg_write(s, OV5640_CMD_ACK, 0x01);           // mark command pending
-    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_TRIG_SINGLE);  // single-shot AF
-    return af_wait_ack_clear(s, timeout_ms);         // completed when ack→0
+    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_CONTINUOUS);  // continuous AF
+
+    // Continuous AF does not clear ACK the way a completed single-shot would;
+    // instead the firmware drives the VCM and fw_status reaches FOCUSED (0x10)
+    // once a sharp peak is found. Wait for that.
+    uint32_t start = millis();
+    while ((millis() - start) < timeout_ms) {
+        if (af_reg_read(s, OV5640_CMD_FW_STATUS) == OV5640_FW_STATUS_FOCUSED) return true;
+        delay(10);
+    }
+    return false;
 }
 
 bool camera_af_probe(void) {
@@ -257,8 +273,9 @@ bool camera_af_probe(void) {
     s_af_loaded = true;
     Serial.println("[AF] firmware loaded, MCU IDLE. Triggering single-shot focus...");
 
-    // DIAGNOSTIC: step through the focus handshake, logging each wait outcome
-    // and the registers, so we can see exactly where it stalls.
+    // DIAGNOSTIC: step through the focus handshake with continuous AF (0x04),
+    // logging status transitions. Single-shot (0x03) was observed to stall at
+    // S_FOCUSING; continuous AF drives the VCM to FOCUSED (0x10).
     Serial.println("[AF] focus seq: MAIN=0x01");
     af_reg_write(s, OV5640_CMD_MAIN, 0x01);
     Serial.println("[AF] focus seq: MAIN=0x08");
@@ -269,14 +286,23 @@ bool camera_af_probe(void) {
                   af_reg_read(s, OV5640_CMD_FW_STATUS) & 0xff);
 
     af_reg_write(s, OV5640_CMD_ACK, 0x01);
-    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_TRIG_SINGLE);
-    bool acked = af_wait_ack_clear(s, 3000);
-    int st_final = af_reg_read(s, OV5640_CMD_FW_STATUS);
-    Serial.printf("[AF] after focus: acked=%d fw_status=0x%02x\n", acked ? 1 : 0, st_final);
+    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_CONTINUOUS);
+    Serial.println("[AF] focus seq: MAIN=0x04 (continuous), waiting for FOCUSED...");
 
-    bool af_ok = acked;
-    if (af_ok) Serial.println("[AF] RESULT: single-shot AF completed — AF-capable module confirmed");
-    else       Serial.println("[AF] RESULT: focus command not acked — likely fixed-focus lens or AF MCU not running");
+    uint32_t t0 = millis();
+    int last = -1;
+    bool focused = false;
+    while ((millis() - t0) < 3000) {
+        int st = af_reg_read(s, OV5640_CMD_FW_STATUS);
+        if (st != last) { Serial.printf("[AF] focus fw_status=0x%02x @%lums\n", st, millis() - t0); last = st; }
+        if (st == OV5640_FW_STATUS_FOCUSED) { focused = true; break; }
+        delay(10);
+    }
+    Serial.printf("[AF] after focus: focused=%d fw_status=0x%02x\n", focused, last);
+
+    bool af_ok = focused;
+    if (af_ok) Serial.println("[AF] RESULT: continuous AF reached FOCUSED — AF-capable module confirmed");
+    else       Serial.println("[AF] RESULT: AF did not reach FOCUSED — fixed-focus lens or VCM not converging");
     s_af_available = af_ok;
     return true;   // firmware path worked; focus outcome logged above
 }
@@ -289,12 +315,12 @@ bool camera_af_trigger_oneshot(void) {
     sensor_t* s = esp_camera_sensor_get();
     if (!s || s->id.PID != OV5640_PID || !s_af_loaded) return false;
 
-    // Full handshake (same as probe). The preamble (MAIN 0x01→0x08 + ack wait)
-    // is mandatory; skipping it leaves CMD_ACK stuck at 0x01 and the lens never
-    // moves. On success, give the VCM a moment to settle before the caller
-    // captures a frame.
-    bool ok = af_run_single_focus(s, 1500);
-    if (ok) delay(50);
+    // Continuous-AF focus (see af_run_focus). The preamble (MAIN 0x01→0x08 +
+    // ack wait) is mandatory. We wait up to the timeout for FOCUSED; a short
+    // settle is unnecessary since reaching FOCUSED already means the VCM
+    // converged, but keep a tiny margin.
+    bool ok = af_run_focus(s, 1500);
+    if (ok) delay(30);
     return ok;
 }
 
