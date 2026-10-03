@@ -196,6 +196,18 @@ static void capture_task(void* param) {
 
         if (s_hires_requested) {
             s_hires_requested = false;
+            // Trigger a single-shot autofocus before the decode window. The
+            // camera is initialized far-focus by default, so close-range label
+            // scanning needs the VCM driven to the near position first. We do
+            // NOT gate this on the boot-time probe result: the probe only tells
+            // us whether AF *worked at boot*, not whether the lens is AF-capable
+            // under current conditions. camera_af_trigger_oneshot() is a no-op
+            // (returns false) on non-OV5640 or if the AF firmware never loaded,
+            // so calling it unconditionally is safe.
+            uint32_t af_t0 = millis();
+            bool af_ok = camera_af_trigger_oneshot();
+            Serial.printf("[PREVIEW] scan: AF %s (%lums)\n",
+                          af_ok ? "locked" : "skipped/failed", millis() - af_t0);
             s_attempts_left = HIRES_MAX_ATTEMPTS;
             s_attempt_deadline = millis() + HIRES_MAX_MS;
             Serial.println("[PREVIEW] scan: starting multi-frame attempt");
