@@ -322,11 +322,10 @@ bool bc1d_decode_line(const uint8_t* luma, int width, bc1d_result_t* out) {
     }
     if (hi - lo < 40) return false;         // too little contrast
 
-    // Stack buffers for the binarized row. Sized for UXGA width (1600) + margin;
-    // callers feed a single row.
-    #define BC1D_MAX_W 1664
-    static bool s_bits[BC1D_MAX_W];
-    if (width > BC1D_MAX_W) width = BC1D_MAX_W;
+    // Stack buffer for the binarized row. Cap at a sane max to bound stack use;
+    // callers feed a single row (<= ~1024 px for our SVGA use).
+    static bool s_bits[1024];
+    if (width > 1024) width = 1024;
 
     // Local adaptive binarization (moving-average threshold).
     //
@@ -338,8 +337,8 @@ bool bc1d_decode_line(const uint8_t* luma, int width, bc1d_result_t* out) {
     // pixel is a bar if it is sufficiently darker than its local neighborhood.
     // Window ~= several modules wide so it averages across bars+spaces.
     {
-        // Prefix sums for O(1) window means. int32 is plenty (255 * 1664).
-        static int32_t s_pre[BC1D_MAX_W + 1];
+        // Prefix sums for O(1) window means. int32 is plenty (255 * 1024).
+        static int32_t s_pre[1025];
         s_pre[0] = 0;
         for (int i = 0; i < width; i++) s_pre[i + 1] = s_pre[i] + luma[i];
 
@@ -376,7 +375,7 @@ bool bc1d_decode_line(const uint8_t* luma, int width, bc1d_result_t* out) {
     }
 
     // Reversed (barcode scanned right-to-left).
-    static bool s_rev[BC1D_MAX_W];
+    static bool s_rev[1024];
     for (int i = 0; i < width; i++) s_rev[i] = s_bits[width - 1 - i];
     if (decode_ean13_bits(s_rev, width, digits)) {
         char buf[16];

@@ -56,16 +56,9 @@
 // product-label bars; preview is downsampled from this to the viewfinder. Note:
 // esp32-camera allocates the framebuffer at init from this size and cannot grow
 // it at runtime, so we must init at the largest size we ever decode.
-//
-// UXGA 1600x1200: 1D barcodes (Code128) need crisp narrow bars. At SVGA 800x600
-// a small label's narrow bar was only 2-5 px and ran-together after optics
-// blur, so the run-length structure collapsed and decode failed. UXGA doubles
-// the linear resolution (narrow bars ~4-12 px), which may clear the threshold.
-// Memory: UXGA RGB565 = 3.84 MB per framebuffer, so fb_count MUST be 1 to fit
-// alongside the UXGA luma buffer (1.92 MB), quirc, and LVGL in 8 MB PSRAM.
-#define CAM_FRAME_SIZE      FRAMESIZE_UXGA      // 1600x1200
+#define CAM_FRAME_SIZE      FRAMESIZE_SVGA      // 800x600
 #define CAM_JPEG_QUALITY    12                  // 0-63, lower = better quality
-#define CAM_FB_COUNT        1                   // single FB (UXGA too big for 2)
+#define CAM_FB_COUNT        2                   // Frame buffer count (PSRAM)
 
 // ─── Scan Settings ──────────────────────────────────────────────────────────
 

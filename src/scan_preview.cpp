@@ -26,18 +26,18 @@
 #define VF_X   ((240 - VF_W) / 2)
 #define VF_Y   ((320 - VF_H) / 2)
 
-// Source camera frame — always-on UXGA (see config.h CAM_FRAME_SIZE). Decoding
+// Source camera frame — always-on SVGA (see config.h CAM_FRAME_SIZE). Decoding
 // uses this full resolution; the preview is downsampled from it.
-#define SRC_W  1600
-#define SRC_H  1200
+#define SRC_W  800
+#define SRC_H  600
 
 // Hi-res decode buffer size (== source frame). Kept for the luma buffer alloc.
-#define HIRES_W            1600
-#define HIRES_H            1200
+#define HIRES_W            800
+#define HIRES_H            600
 #define HIRES_LUMA_PX      (HIRES_W * HIRES_H)
 
 // Fixed-point (16.16) sampling steps for non-integer downscale.
-// UXGA 1600x1200 → VF 200x150 is an 8x reduction on both axes.
+// SVGA 800x600 → VF 200x150 is a 4x reduction on both axes.
 #define STEP_X  ((SRC_W << 16) / VF_W)   // src px per dst px, 16.16
 #define STEP_Y  ((SRC_H << 16) / VF_H)
 
@@ -196,8 +196,8 @@ static void capture_task(void* param) {
     sensor_t* s = esp_camera_sensor_get();
     if (s) {
         s->set_pixformat(s, PIXFORMAT_RGB565);
-        s->set_framesize(s, FRAMESIZE_UXGA);
-        Serial.printf("[PREVIEW] sensor: UXGA RGB565, PID=0x%02x\n", s->id.PID);
+        s->set_framesize(s, FRAMESIZE_SVGA);
+        Serial.printf("[PREVIEW] sensor: SVGA RGB565, PID=0x%02x\n", s->id.PID);
     }
 
     camera_fb_t* fb = nullptr;
