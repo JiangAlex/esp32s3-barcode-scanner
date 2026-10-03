@@ -266,26 +266,32 @@ DecodeResult barcode_decode(camera_fb_t* fb) {
 DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
     DecodeResult result = {false, BARCODE_UNKNOWN, "", ""};
     if (!luma || w <= 0 || h <= 0) return result;
-
-    // ── QR on a QVGA-downsampled copy ──
-    // quirc's identify cost scales with pixel count; running it at SVGA can take
-    // seconds and trip the task watchdog. QR modules are coarse — QVGA
-    // resolution is plenty — so downsample the hi-res frame to 320x240 (nearest
-    // neighbor) into s_luma and run QR there. quirc stays sized at QVGA.
+    // ── QR on a centered-ROI downsampled copy ──
+    // quirc's identify cost scales with pixel count; running it at full SVGA can
+    // take seconds and trip the task watchdog, so we downsample into the QVGA
+    // (320x240) quirc buffer. But downsampling the WHOLE 800x600 frame (2.5x)
+    // shrinks a small QR until its modules are <1px and finder patterns vanish
+    // (observed on-device: count=0 despite high-contrast luma). The user aims
+    // the QR at the center, so instead crop a centered ROI and scale THAT to
+    // 320x240 — a much gentler reduction that preserves module resolution.
+    // ROI = centered 62.5% (500x375 of 800x600) → 1.56x reduction vs 2.5x.
     if (qr_decoder && s_luma) {
         const int QW = 320, QH = 240;
-        // Box-average downscale w×h → QW×QH. Averaging each source cell (vs
-        // nearest-neighbor point sampling) low-pass filters the image, which
-        // suppresses moiré from photographing a phone/monitor screen and
-        // smooths mild defocus — both improve quirc finder-pattern detection.
-        // Cell size in source pixels per destination pixel:
-        int cw = w / QW; if (cw < 1) cw = 1;    // ~2 for 800→320
-        int ch = h / QH; if (ch < 1) ch = 1;    // ~2 for 600→240
+        // Centered ROI in source pixels (same 4:3 aspect as QW:QH).
+        int roi_w = (w * 5) / 8;          // 62.5% → 500 for 800
+        int roi_h = (h * 5) / 8;          // 62.5% → 375 for 600
+        int roi_x = (w - roi_w) / 2;
+        int roi_y = (h - roi_h) / 2;
+        // Box-average downscale ROI → QW×QH. Averaging low-pass filters the
+        // image (suppresses moiré and smooths mild defocus), improving quirc
+        // finder-pattern detection.
+        int cw = roi_w / QW; if (cw < 1) cw = 1;
+        int ch = roi_h / QH; if (ch < 1) ch = 1;
         for (int dy = 0; dy < QH; dy++) {
-            int sy0 = (int)((long)dy * h / QH);
+            int sy0 = roi_y + (int)((long)dy * roi_h / QH);
             uint8_t* drow = s_luma + dy * QW;
             for (int dx = 0; dx < QW; dx++) {
-                int sx0 = (int)((long)dx * w / QW);
+                int sx0 = roi_x + (int)((long)dx * roi_w / QW);
                 uint32_t sum = 0;
                 int n = 0;
                 for (int yy = 0; yy < ch; yy++) {
