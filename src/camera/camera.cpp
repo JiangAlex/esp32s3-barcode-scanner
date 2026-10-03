@@ -215,25 +215,62 @@ bool camera_af_probe(void) {
             return false;
         }
     }
+
+    // DIAGNOSTIC: read back the first few firmware bytes to confirm the SCCB
+    // writes to program memory (0x8000+) actually stick. If readback != blob,
+    // the register path to program memory is the problem (not the handshake).
+    Serial.print("[AF] fw readback @0x8000: ");
+    bool fw_match = true;
+    for (int i = 0; i < 8; i++) {
+        int rb = af_reg_read(s, 0x8000 + i);
+        Serial.printf("%02x ", rb & 0xff);
+        if ((rb & 0xff) != ov5640_af_firmware[i]) fw_match = false;
+    }
+    Serial.printf("| expect: ");
+    for (int i = 0; i < 8; i++) Serial.printf("%02x ", ov5640_af_firmware[i]);
+    Serial.printf("| %s\n", fw_match ? "MATCH" : "MISMATCH");
+
     af_reg_write(s, OV5640_CMD_MAIN, 0x00);
     af_reg_write(s, OV5640_CMD_ACK, 0x00);
     for (int r = OV5640_CMD_PARA0; r <= OV5640_CMD_PARA4; r++) af_reg_write(s, r, 0x00);
     af_reg_write(s, OV5640_CMD_FW_STATUS, 0x7f);
     af_reg_write(s, 0x3000, 0x00);            // start MCU
 
-    if (!af_wait_fw_idle(s, 3000)) {
-        Serial.println("[AF] firmware did not reach IDLE — AF MCU not responding");
-        return false;
+    // DIAGNOSTIC: poll fw_status explicitly and log the transition to IDLE.
+    {
+        uint32_t t0 = millis();
+        int last = -1, reads = 0;
+        bool idle = false;
+        while ((millis() - t0) < 3000) {
+            int st = af_reg_read(s, OV5640_CMD_FW_STATUS);
+            reads++;
+            if (st != last) { Serial.printf("[AF] boot fw_status=0x%02x @%lums\n", st, millis() - t0); last = st; }
+            if (st == OV5640_FW_STATUS_IDLE) { idle = true; break; }
+            delay(5);
+        }
+        Serial.printf("[AF] boot poll: idle=%d reads=%d last=0x%02x\n", idle, reads, last);
+        if (!idle) {
+            Serial.println("[AF] firmware did not reach IDLE — AF MCU not responding");
+            return false;
+        }
     }
     s_af_loaded = true;
     Serial.println("[AF] firmware loaded, MCU IDLE. Triggering single-shot focus...");
 
-    // Run a single-shot focus with the full official handshake (see
-    // af_run_single_focus). Completion is signaled by CMD_ACK returning to
-    // 0x00. We then read fw_status: 0x10 (FOCUSED) means the search converged;
-    // a successful ack on a fixed-focus module is unlikely since the handshake
-    // depends on the AF MCU firmware driving the VCM loop.
-    bool acked = af_run_single_focus(s, 3000);
+    // DIAGNOSTIC: step through the focus handshake, logging each wait outcome
+    // and the registers, so we can see exactly where it stalls.
+    Serial.println("[AF] focus seq: MAIN=0x01");
+    af_reg_write(s, OV5640_CMD_MAIN, 0x01);
+    Serial.println("[AF] focus seq: MAIN=0x08");
+    af_reg_write(s, OV5640_CMD_MAIN, 0x08);
+    bool pre_ack = af_wait_ack_clear(s, 3000);
+    Serial.printf("[AF] preamble ack-clear=%d (ack=0x%02x fw=0x%02x)\n",
+                  pre_ack, af_reg_read(s, OV5640_CMD_ACK) & 0xff,
+                  af_reg_read(s, OV5640_CMD_FW_STATUS) & 0xff);
+
+    af_reg_write(s, OV5640_CMD_ACK, 0x01);
+    af_reg_write(s, OV5640_CMD_MAIN, OV5640_AF_TRIG_SINGLE);
+    bool acked = af_wait_ack_clear(s, 3000);
     int st_final = af_reg_read(s, OV5640_CMD_FW_STATUS);
     Serial.printf("[AF] after focus: acked=%d fw_status=0x%02x\n", acked ? 1 : 0, st_final);
 
