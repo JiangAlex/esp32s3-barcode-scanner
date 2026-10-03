@@ -312,29 +312,6 @@ void setup() {
 }
 
 void loop() {
-    // ── Serial VCM focus tuning (temporary, for finding the sharpest manual
-    //    focus position) ───────────────────────────────────────────────────
-    //   '+' / '='  : move focus nearer (VCM += 20)
-    //   '-'        : move focus farther (VCM -= 20)
-    //   'p'        : print current VCM value
-    // Point the camera at a label at the real scan distance and nudge until
-    // the preview is sharpest; note the printed value.
-    while (Serial.available() > 0) {
-        char c = (char)Serial.read();
-        uint16_t vcm = camera_af_get_manual();
-        if (c == '+' || c == '=') {
-            vcm = (vcm > 1003) ? 1023 : vcm + 20;
-            camera_af_set_manual(vcm);
-            Serial.printf("[FOCUS] VCM=%u (nearer)\n", vcm);
-        } else if (c == '-') {
-            vcm = (vcm < 20) ? 0 : vcm - 20;
-            camera_af_set_manual(vcm);
-            Serial.printf("[FOCUS] VCM=%u (farther)\n", vcm);
-        } else if (c == 'p') {
-            Serial.printf("[FOCUS] current VCM=%u\n", vcm);
-        }
-    }
-
     // Poll BOOT button (active LOW, pull-up so default HIGH)
     static bool     g_btn_was_pressed = false;
     static uint32_t g_btn_press_ms   = 0;

@@ -382,3 +382,66 @@ SVGA 擷取前自動觸發對焦，**不需改程式碼**。
 - 長按 = 切模式（QUERY/INPUT/INVENTORY）
 - 長按住 >2s = 回首頁
 - 盤點清單頁入口待重新加入（原長按進入已改為切模式）
+
+
+---
+
+# Session 2026-10-03 — 換 AF 鏡頭後仍掃不出 → 真正根因是 luma byte order
+
+對應 Redmine #61 延續。換上 AF 鏡頭模組 **FD5640 500W-v11**（OV5640 + VCM），但掃描仍
+`window expired, no code`。歷經數輪實機除錯，**最終根因與 AF 完全無關**，是 RGB565→luma
+轉換的 byte order 錯誤。以下按實機數據推進的順序記錄。
+
+## 除錯歷程（每步以 serial 數據定位）
+
+1. **AF 從沒被觸發**：掃描 attempt 直接進解碼，從未呼叫 `camera_af_trigger_oneshot()`。
+   補上。memory 先前寫「換 AF 版免改碼」是錯的——該路徑從沒接上。
+2. **AF 完成判據錯**：原等 `fw_status==0x10 FOCUSED`，但 single-shot (0x03) 完成是靠
+   `CMD_ACK (0x3023)` 清零，不是 fw_status。改用 ACK 判據。
+3. **AF 握手不完整**：對照官方 `esp32-camera/sensors/ov5640_af.c` 的 `ov5640_af_start`，
+   single focus 前需先 `MAIN=0x01; MAIN=0x08; 等 ack-clear` 前置握手。補上後 preamble ack
+   成功，但 `MAIN=0x03` single focus 仍卡 `fw_status=0x00` 不收斂。
+4. **改 continuous AF (0x04)**：也卡 0x00 不到 0x10。
+5. **暫存器級診斷**：firmware readback MATCH、MCU 到 IDLE(0x70)、preamble ack-clear=1，
+   但任何對焦指令一下就卡 S_FOCUSING(0x00)。→ 軟體層全正常，疑 VCM 未驅動。
+6. **設 VCM control `0x3600=0x08`/`0x3601=0x33`**（OmniVision init 值，esp32-camera 預設
+   不設）：回讀正確，但對焦仍卡 0x00。
+7. **手動 VCM 掃描測試**（繞過演算法，直接寫 `0x3022` manual mode + `0x3023/0x3024` 位置）：
+   **實機肉眼確認焦距有變化** → VCM 馬達是好的，純粹 AF 演算法不收斂（此模組特性）。
+8. **結論：放棄演算法 AF，改手動固定近焦**。但換成固定對焦後**仍掃不出**。
+9. **QR 解碼診斷**：印 luma 統計 + quirc identify count。`luma min=0 max=255`（對比完美）
+   但 `count=0`（finder pattern 偵測不到）。先試「中央 ROI 裁切再降採樣」（怕小 QR 降採樣後
+   模組 <1px）——仍 count=0。
+10. **GitHub 研究定案**：對照官方 `espressif/qrcode-demo` 的 `rgb565_to_grayscale`，發現它
+    從 camera buf 讀 RGB565 時 **先 `__builtin_bswap16`** 才拆 R/G/B。我們的 luma 轉換是
+    **原生讀取不 swap**（顯示路徑 no-swap 正確，但 luma 沿用是錯的）。byte order 錯 → 綠色
+    分量（跨兩 byte、占 luma 權重 59%）錯位 → QR 黑白關係破壞 → count=0。另有 esp32.com
+    中文帖回報同症狀（畫面正常、count 恆 0）。
+
+## 根本原因
+
+**`rgb565_to_luma` 系列函式原生讀取 RGB565，未 byte-swap。** 顯示路徑原生讀取是對的（顏色
+正確，見 Session 2026-09-22 根因 #5），但 luma 轉換必須 byte-swap 才能正確還原灰階。先前
+QR 偶爾能解出 TEST123（Session 2026-09-22/27），是因為當時用的影像夠大/夠正、錯誤的 luma
+仍勉強可辨；小 QR + AF 鏡頭下錯誤被放大，徹底解不出。
+
+## 修正（已實機驗證解出 `TEST123`，多次穩定）
+
+- `scan_preview.cpp` `rgb565_to_luma_local`：加 `__builtin_bswap16`（對齊官方 demo）。**關鍵修正**。
+- `barcode_decoder.cpp` `qr_try_threshold`：加 `quirc_flip` 重試（相機有 hmirror/vflip，QR 可能鏡像）。
+- `barcode_decode_luma` QR 路徑：改中央 62.5% ROI 裁切再降採樣（小 QR 保留模組解析度）。
+- **AF：此 FD5640 模組演算法 AF 不收斂，改用手動固定近焦**。`camera_af_set_manual()` 直接寫
+  VCM 位置（`0x3022` manual + `0x3023/0x3024`），開機套用 `VCM=240`。probe 僅載入 firmware
+  （保留以供手動 VCM 控制），不再跑注定失敗的對焦握手。`camera_af_trigger_oneshot()` 改為套用
+  固定近焦（瞬間，`AF locked (4ms)`）。
+
+## 待辦 / 可調
+
+1. **VCM=240 是初始值,未精調**。可用實際標籤距離微調最清楚的 VCM 值（曾加 serial +/- 微調,
+   驗證後已移除;需要再調可還原）。
+2. 實機實測 `TEST123` 已穩定解出;1D 條碼（EAN-13/Code128）尚未在此 byte-order 修正後重測。
+3. 診斷 log 已清理;保留 `[AF] firmware loaded; using manual fixed-focus` 一行說明。
+
+## 最終 build
+
+RAM 42.2% (138316 / 327680)、Flash 24.3% (763681 / 3145728)。
