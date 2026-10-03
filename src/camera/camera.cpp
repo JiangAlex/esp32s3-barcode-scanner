@@ -239,7 +239,7 @@ bool camera_af_is_available(void) {
 // focus, large = far/infinity. On-device the algorithmic AF never converges on
 // this FD5640 module, but a manual sweep visibly changed focus — so the motor
 // is good and we drive it directly.
-static uint16_t s_vcm_manual = 240;   // default near-focus for close labels
+static uint16_t s_vcm_manual = 120;   // near-focus peak (from sharpness sweeps)
 
 static void af_set_vcm_manual(sensor_t* s, uint16_t vcm) {
     s->set_reg(s, 0x3022, 0x00, 0xff);                 // manual focus mode

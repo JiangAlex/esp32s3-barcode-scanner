@@ -312,14 +312,14 @@ void setup() {
 }
 
 void loop() {
-    // ── Serial VCM focus tuning (for finding the sharpest manual focus for 1D
-    //    barcodes, which need crisp narrow bars) ───────────────────────────
+    // ── Serial focus calibration ─────────────────────────────────────────
+    // This FD5640 module's algorithmic AF does not converge, so focus is a
+    // fixed manual VCM position (default 120, near-focus). These serial
+    // commands let it be re-calibrated for a specific scan distance:
     //   '+' / '='  : focus nearer (VCM += 10)
     //   '-'        : focus farther (VCM -= 10)
     //   digits + Enter (e.g. "300\n") : set VCM to that absolute value
     //   'p'        : print current VCM
-    // Aim at a 1D barcode at the scan distance and tune until the preview's
-    // narrow bars are individually crisp; note the VCM value.
     {
         static int  s_num = -1;             // accumulating numeric entry
         while (Serial.available() > 0) {

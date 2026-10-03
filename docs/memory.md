@@ -445,3 +445,66 @@ QR 偶爾能解出 TEST123（Session 2026-09-22/27），是因為當時用的影
 ## 最終 build
 
 RAM 42.2% (138316 / 327680)、Flash 24.3% (763681 / 3145728)。
+
+
+---
+
+# Session 2026-10-03 (續) — 1D 條碼：ZXing 比對 + 自動對焦 + UXGA，最終判定為鏡頭光學極限
+
+接續上一段(QR byte-order 修好後)。目標:讓 1D 條碼(Code128)在實機解出。結論:**1D 在此
+FD5640 500W 模組(鏡頭光學 + 定焦)下無法用純軟體解碼,受鏡頭 MTF 限制,非軟體問題。** QR 可用,
+1D 演算法就緒但受硬體限。
+
+## 除錯歷程(每步以實機數據推進)
+
+1. **1D 無任何 [DECODE] 輸出**:加診斷。發現對比完美(min=0 max=255)、25 條掃描線全過對比門檻,
+   但解碼全失敗。
+2. **二值化**:全域 min/max 中點 → 光照不均把 narrow bar 判成白。改**局部自適應(moving-average)**。
+   dark 比例從 ~30% 升到 ~40%,但仍解不出。
+3. **span 污染**:解碼器用「第一個/最後一個暗像素」當條碼範圍,被背景雜訊撐大。
+4. **Code128 多起點**:原從第一個 bar 硬解,前導雜訊即錯位。改成嘗試多個 run 起點。仍失敗。
+5. **GitHub 研究(ZXing Code128Reader)**:根因是我們**整數量化**(run/module 四捨五入)太脆弱。
+   改用 ZXing 的**原始 counter 歸一化 variance 比對**(MAX_AVG_VARIANCE=0.25)。host 24/24,
+   但實機仍失敗。
+6. **run-length dump**:直接印中央掃描線 run 序列。發現最佳對焦下 `nruns` 只有 ~19(應 ~50)、
+   出現 `333` 超大 run → narrow bar 糊成大塊,run 結構塌縮。
+7. **自動對焦掃描**(sharpness = 中央 ROI 水平梯度能量):掃 VCM 80..600 找最銳利點。
+   - 對準時 sharpness 峰值 ~85000-92000,峰值在近焦 **VCM≈120**。
+   - 但**曲線平坦無尖峰**,且最佳焦下 run 仍塌縮 → 鏡頭 MTF 在 narrow bar 空間頻率已衰減。
+8. **UXGA 1600×1200 嘗試**:OV5640 是 5MP,之前只用 SVGA。想用更高解析度救 narrow bar。
+   - **UXGA RGB565 常駐 → 卡死**(每幀 3.84MB,DVP/DMA 頻寬爆,esp_camera_fb_get hang)。已 revert。
+   - 正確路線應為 UXGA **JPEG**(壓縮後 ~100-300KB,頻寬可行),但工程量大且仍受鏡頭光學限,未做。
+
+## 根本原因(完整證據鏈)
+
+| 環節 | 狀態 |
+|------|------|
+| 二值化 | 健康(自適應,dark 比例合理) |
+| 解碼演算法 | ZXing 業界標準 variance 比對,host 24/24 |
+| 對焦 | 客觀 sharpness 掃描,峰值 VCM≈120,但**曲線平坦無尖峰** |
+| 條碼尺寸 | 大條碼已測 |
+| 解析度 | SVGA 已是 RGB565 可用上限(UXGA RGB565 頻寬卡死) |
+| **結論** | **鏡頭 MTF 不足以解析 Code128 narrow bar = 光學物理極限** |
+
+**GitHub 業界佐證**:ESP32 純軟體(quirc)專案清一色**只做 QR**(espressif/qrcode-demo、
+ESP32QRCodeReader 等)。要做 1D 的都用**專用解碼晶片**(如 M5Stack Unit QRCode STM32F030,
+otitbridge/m5stick-s3-qr-phomemo),ESP32 只讀結果。→ ESP32+相機純軟體 1D 是公認困難,我們的
+演算法已達業界水準,瓶頸在光學。
+
+**QR vs 1D 差異**:QR 只需偵測 3 個粗大 finder pattern(容錯高);1D 需精確還原每根 narrow bar
+(要求高一個量級)。故同樣模糊影像 QR 能解、1D 不能。
+
+## 最終狀態(本段收尾)
+
+- **QR**:穩定可用(byte-order 修正)。純軟體 quirc,與業界成熟做法同級。
+- **1D**:演算法就緒(ZXing variance,host 24/24),保留於碼內;受此鏡頭光學限,實機無法解。
+  未來若需 1D,建議:(a) 換更好光學的 AF 鏡頭模組,或 (b) 加專用解碼晶片(業界做法),
+  或 (c) 做 UXGA JPEG 單張精解(未驗證,仍可能受光學限)。
+- **對焦**:AF 演算法不收斂,改固定手動近焦 **VCM=120**(sharpness 掃描近焦峰值)。
+  保留 serial `+`/`-`/數字/`p` 校正指令(`send_on_enter` filter 下可用)。
+- **已移除**:autofocus_sweep(11s、拖垮 fps、對 1D 無效、QR 不需)、所有 QR/1D diag log、
+  UXGA 實驗(已 revert)。
+
+## 最終 build
+
+RAM 43.5% (142412 / 327680)、Flash 24.3% (763941 / 3145728)。host 1D 測試 24/24。

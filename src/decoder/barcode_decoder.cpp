@@ -348,39 +348,6 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
         bc1d_result_t r1d;
         int n_lines = (h >= 480) ? 25 : 15;
 
-        // DIAGNOSTIC: dump the center scanline's run-lengths using the SAME
-        // adaptive binarization the decoder uses. Code128 Start-B is modules
-        // 2-1-1-2-1-4; seeing the first bar-run cluster lets us tell whether
-        // the run pattern is even recoverable (image/sampling) or the decode
-        // logic is the problem. Print the first ~28 runs.
-        {
-            const uint8_t* row = luma + (long)(h/2) * w;
-            // adaptive threshold identical to bc1d_decode_line
-            static int32_t pre[801];
-            int ww = (w > 800) ? 800 : w;
-            pre[0] = 0;
-            for (int x = 0; x < ww; x++) pre[x+1] = pre[x] + row[x];
-            int win = ww / 20; if (win < 7) win = 7;
-            // find first bar, then collect runs
-            static bool bits[801];
-            for (int x = 0; x < ww; x++) {
-                int a = x - win; if (a < 0) a = 0;
-                int b = x + win; if (b > ww-1) b = ww-1;
-                int mean = (pre[b+1] - pre[a]) / (b - a + 1);
-                bits[x] = (row[x] < mean - 8);
-            }
-            int x = 0; while (x < ww && !bits[x]) x++;
-            int first = x;
-            int runs[40]; int nr = 0; bool cur = true; int len = 0;
-            for (; x < ww; x++) {
-                if (bits[x] == cur) len++;
-                else { if (nr < 40) runs[nr++] = len; else break; cur = bits[x]; len = 1; }
-            }
-            Serial.printf("[DECODE] 1D diag: w=%d first_bar=%d nruns=%d runs:", ww, first, nr);
-            for (int k = 0; k < nr && k < 28; k++) Serial.printf(" %d", runs[k]);
-            Serial.println();
-        }
-
         if (bc1d_decode_image(luma, w, h, w, n_lines, &r1d)) {
             result.success = true;
             result.content = String(r1d.text);
