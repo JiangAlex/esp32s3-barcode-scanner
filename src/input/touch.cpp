@@ -62,17 +62,21 @@ bool touch_init(uint16_t width, uint16_t height, uint8_t rotation) {
     }
 
     uint8_t id = 0;
-    if (!cst816_read(CST816_ID_REG, &id, 1)) {
-        Serial.println("[TOUCH] CST816 I2C read failed");
-        return false;
-    }
-    if (id != TOUCH_CHIP_ID) {
-        Serial.printf("[TOUCH] Unexpected chip ID: 0x%02X (expected 0x%02X)\n",
+    bool id_ok = cst816_read(CST816_ID_REG, &id, 1);
+    // CST816 is a low-power controller: when idle it may not ACK on I2C until
+    // it is first touched, so an ID read at boot often fails even though the
+    // chip is present and works. The official Waveshare bsp_cst816 doesn't gate
+    // on the ID read either. So we DON'T bail out on failure — register the
+    // input device regardless and let touch_read() poll; the panel responds
+    // once a finger is down. Log what we saw for diagnostics.
+    if (!id_ok) {
+        Serial.println("[TOUCH] CST816 ID read failed at boot (chip may be idle; enabling anyway)");
+    } else if (id != TOUCH_CHIP_ID) {
+        Serial.printf("[TOUCH] CST816 ID 0x%02X (expected 0x%02X); enabling anyway\n",
                       id, TOUCH_CHIP_ID);
-        return false;
+    } else {
+        Serial.println("[TOUCH] CST816D initialized (ID OK)");
     }
-
-    Serial.println("[TOUCH] CST816D initialized");
     return true;
 }
 
@@ -91,6 +95,7 @@ void touch_read(void) {
     g_raw_x = (uint16_t)((xh & 0x0F) << 8) | xl;
     g_raw_y = (uint16_t)((yh & 0x0F) << 8) | yl;
     g_touch_flag = true;
+    Serial.printf("[TOUCH] down raw=(%u,%u) num=%u\n", g_raw_x, g_raw_y, touch_num);
 }
 
 bool touch_get_coordinates(uint16_t* x, uint16_t* y) {
