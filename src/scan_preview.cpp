@@ -78,10 +78,21 @@ static inline uint16_t gray_to_rgb565(uint8_t g) {
     return (r << 8) | (gg << 3) | (b >> 3);
 }
 
-// RGB565 → 8-bit luma (Rec.601), native uint16 read (byte order matches panel).
+// RGB565 → 8-bit luma (Rec.601).
+//
+// IMPORTANT byte-order note: the LCD display path reads the camera's RGB565
+// natively (no swap) and shows correct colors — but that does NOT mean the
+// luma conversion should also read natively. The official espressif
+// qrcode-demo byte-swaps each RGB565 word (__builtin_bswap16) before splitting
+// R/G/B for its grayscale conversion. If we read natively here, the green
+// field (which spans both bytes and carries 59% of luma weight) is scrambled,
+// corrupting the black/white relationship that quirc needs — the image still
+// has full dynamic range (min=0 max=255) but finder patterns can't be found
+// (observed on-device: quirc count=0 despite a visibly sharp QR). So swap the
+// bytes to match the camera's actual word order for luma.
 static void rgb565_to_luma_local(const uint16_t* src, uint8_t* dst, int npx) {
     for (int i = 0; i < npx; i++) {
-        uint16_t px = src[i];
+        uint16_t px = __builtin_bswap16(src[i]);
         uint8_t r = (px >> 11) & 0x1F;
         uint8_t g = (px >> 5)  & 0x3F;
         uint8_t b =  px        & 0x1F;

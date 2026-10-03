@@ -111,6 +111,14 @@ static bool qr_try_threshold(const uint8_t* luma, int w, int h, int th,
             *content = String((const char*)data.payload, data.payload_len);
             return true;
         }
+        // The camera runs with hmirror/vflip set, so the QR may be mirrored.
+        // The official qrcode-demo flips the extracted code before decoding;
+        // retry with a flip to cover the mirrored case.
+        quirc_flip(&code);
+        if (quirc_decode(&code, &data) == QUIRC_SUCCESS) {
+            *content = String((const char*)data.payload, data.payload_len);
+            return true;
+        }
     }
     return false;
 }
