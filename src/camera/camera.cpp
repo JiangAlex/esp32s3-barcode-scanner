@@ -79,6 +79,13 @@ bool camera_init(void) {
     // attached lens is an AF (VCM) module. Result gates the SVGA AF trigger.
     camera_af_probe();
 
+    // Algorithmic AF does not converge on the FD5640 module, but the VCM moves
+    // when driven directly. Apply a fixed near-focus position so the preview is
+    // usable for close-range labels from boot. Tune via the serial +/- commands.
+    camera_af_set_manual(camera_af_get_manual());
+    Serial.printf("[AF] manual focus applied: VCM=%u (tune with serial +/-)\n",
+                  camera_af_get_manual());
+
     return true;
 }
 
@@ -325,32 +332,37 @@ bool camera_af_is_available(void) {
 
 // Directly command the VCM to an absolute position, bypassing the AF MCU
 // algorithm entirely. value range ~0..1023 (usable ~100..900): small = near
-// focus, large = far/infinity. This is the decisive test for whether the lens
-// actuator physically moves: if a sweep changes the preview sharpness, the VCM
-// is alive and only the AF *algorithm* was failing; if nothing changes across
-// the whole range, the VCM is not being driven (hardware: FPC/VCM power).
+// focus, large = far/infinity. On-device the algorithmic AF never converges on
+// this FD5640 module, but a manual sweep visibly changed focus — so the motor
+// is good and we drive it directly.
+static uint16_t s_vcm_manual = 240;   // default near-focus for close labels
+
 static void af_set_vcm_manual(sensor_t* s, uint16_t vcm) {
     s->set_reg(s, 0x3022, 0x00, 0xff);                 // manual focus mode
     s->set_reg(s, 0x3023, (vcm >> 8) & 0x03, 0xff);    // position high bits
     s->set_reg(s, 0x3024, vcm & 0xff, 0xff);           // position low byte
 }
 
+bool camera_af_set_manual(uint16_t vcm) {
+    sensor_t* s = esp_camera_sensor_get();
+    if (!s || s->id.PID != OV5640_PID) return false;
+    s_vcm_manual = vcm;
+    af_set_vcm_manual(s, vcm);
+    return true;
+}
+
+uint16_t camera_af_get_manual(void) {
+    return s_vcm_manual;
+}
+
 bool camera_af_trigger_oneshot(void) {
     sensor_t* s = esp_camera_sensor_get();
-    if (!s || s->id.PID != OV5640_PID || !s_af_loaded) return false;
+    if (!s || s->id.PID != OV5640_PID) return false;
 
-    // DIAGNOSTIC MODE: manual VCM sweep. Drives the motor to near / mid / far
-    // so the preview can be watched for any focus change. Replaces the
-    // algorithmic focus temporarily to isolate motor vs. algorithm.
-    const uint16_t positions[] = { 100, 300, 500, 700, 900 };
-    for (size_t i = 0; i < sizeof(positions)/sizeof(positions[0]); i++) {
-        af_set_vcm_manual(s, positions[i]);
-        Serial.printf("[AF] manual VCM=%u — watch preview for focus change\n", positions[i]);
-        delay(700);
-    }
-    // Leave the lens at a near position (good for close-range label scanning).
-    af_set_vcm_manual(s, 200);
-    Serial.println("[AF] manual sweep done, parked at VCM=200 (near)");
+    // Algorithmic AF (single/continuous) does not converge on this module, but
+    // the VCM moves when driven directly. Apply the current fixed near-focus
+    // position. Fast and deterministic for fixed-distance label scanning.
+    af_set_vcm_manual(s, s_vcm_manual);
     return true;
 }
 

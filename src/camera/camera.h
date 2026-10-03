@@ -73,6 +73,23 @@ bool camera_af_is_available(void);
 bool camera_af_trigger_oneshot(void);
 
 /**
+ * @brief Manually set the VCM (lens actuator) position, bypassing the AF MCU
+ *        algorithm. On the FD5640 500W module the algorithmic AF never
+ *        converges (fw_status stuck at S_FOCUSING), but the VCM moves fine when
+ *        driven directly — confirmed on-device by a visible focus sweep. For a
+ *        fixed-distance scanner, locking a near-focus position is both faster
+ *        and more reliable than algorithmic AF.
+ * @param vcm Position ~0..1023 (usable ~100..900): smaller = nearer focus.
+ * @return true if the sensor accepted the writes (OV5640 present).
+ */
+bool camera_af_set_manual(uint16_t vcm);
+
+/**
+ * @brief Get the current manual VCM focus position.
+ */
+uint16_t camera_af_get_manual(void);
+
+/**
  * @brief Ensure the sensor is in SVGA (800x600). The camera is initialized at
  *        SVGA so decoding always has full resolution; this is a safety no-op
  *        re-assert. Returns true on success.
