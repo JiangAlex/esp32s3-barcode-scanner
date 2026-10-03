@@ -28,18 +28,27 @@ static uint16_t g_raw_y = 0;
 
 // ─── Low-level I2C register access ──────────────────────────────────────────
 
-static bool cst816_read(uint8_t reg, uint8_t* data, uint8_t len) {
-    Wire.beginTransmission(TOUCH_I2C_ADDR);
+// Runtime touch I2C address. Starts at the configured CST816 addr but the
+// probe in touch_read() may switch it to whichever address actually responds
+// (this board scans 0x7E, not the standard CST816 0x15 — likely a variant).
+static uint8_t g_touch_addr = TOUCH_I2C_ADDR;
+
+static bool cst816_read_at(uint8_t addr, uint8_t reg, uint8_t* data, uint8_t len) {
+    Wire.beginTransmission(addr);
     Wire.write(reg);
     if (Wire.endTransmission(true) != 0) {
         return false;
     }
-    Wire.requestFrom((uint8_t)TOUCH_I2C_ADDR, len);
+    Wire.requestFrom(addr, len);
     for (uint8_t i = 0; i < len; i++) {
         if (!Wire.available()) return false;
         data[i] = Wire.read();
     }
     return true;
+}
+
+static bool cst816_read(uint8_t reg, uint8_t* data, uint8_t len) {
+    return cst816_read_at(g_touch_addr, reg, data, len);
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -81,6 +90,25 @@ bool touch_init(uint16_t width, uint16_t height, uint8_t rotation) {
 }
 
 void touch_read(void) {
+    // DIAGNOSTIC/PROBE: the standard CST816 address 0x15 never ACKs on this
+    // board, but a scan shows 0x7E. Probe both for the touch-count register;
+    // lock g_touch_addr onto whichever responds with a nonzero touch count.
+    static bool s_addr_locked = false;
+    if (!s_addr_locked) {
+        const uint8_t cand[2] = { 0x15, 0x7E };
+        for (int i = 0; i < 2; i++) {
+            uint8_t n = 0;
+            if (cst816_read_at(cand[i], CST816_TOUCH_NUM_REG, &n, 1)) {
+                Serial.printf("[TOUCH] probe addr=0x%02X num_reg=%u (readable)\n", cand[i], n);
+                if (n > 0 && n <= 5) {        // plausible touch count → this is it
+                    g_touch_addr = cand[i];
+                    s_addr_locked = true;
+                    Serial.printf("[TOUCH] locked onto addr 0x%02X\n", cand[i]);
+                }
+            }
+        }
+    }
+
     uint8_t touch_num = 0;
     if (!cst816_read(CST816_TOUCH_NUM_REG, &touch_num, 1) || touch_num == 0) {
         return;
