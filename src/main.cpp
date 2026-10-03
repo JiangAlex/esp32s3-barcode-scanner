@@ -176,12 +176,12 @@ static void init_qmi8658(void) {
     // DIAGNOSTIC: step through the read manually and report each stage.
     if (!i2c_lock(-1)) { Serial.println("[QMI8658] i2c lock fail"); return; }
     Wire.beginTransmission(IMU_I2C_ADDR);
-    Wire.write(0x0F);                       // WHO_AM_I
+    Wire.write(0x00);                       // WHO_AM_I (QMI8658 reg 0x00 → 0x05)
     uint8_t et = Wire.endTransmission(true);
     uint8_t got = Wire.requestFrom((uint8_t)IMU_I2C_ADDR, (uint8_t)1);
     int v = (got && Wire.available()) ? Wire.read() : -1;
     i2c_unlock();
-    Serial.printf("[QMI8658] WHO_AM_I: endTx=%u requested=1 got=%u val=0x%02X (expect 0x05)\n",
+    Serial.printf("[QMI8658] WHO_AM_I@0x00: endTx=%u got=%u val=0x%02X (expect 0x05)\n",
                   et, got, v & 0xFF);
 }
 
