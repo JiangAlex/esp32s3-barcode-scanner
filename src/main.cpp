@@ -173,22 +173,29 @@ static void lvgl_task(void* param) {
 // ─── QMI8658 IMU ────────────────────────────────────────────────────────────
 
 static void init_qmi8658(void) {
-    uint8_t id = 0;
-    if (i2c_reg_read(IMU_I2C_ADDR, 0x0F, &id, 1)) {
-        Serial.printf("[QMI8658] ID=0x%02X\n", id);
-    } else {
-        Serial.println("[QMI8658] read failed");
-    }
+    // DIAGNOSTIC: step through the read manually and report each stage.
+    if (!i2c_lock(-1)) { Serial.println("[QMI8658] i2c lock fail"); return; }
+    Wire.beginTransmission(IMU_I2C_ADDR);
+    Wire.write(0x0F);                       // WHO_AM_I
+    uint8_t et = Wire.endTransmission(true);
+    uint8_t got = Wire.requestFrom((uint8_t)IMU_I2C_ADDR, (uint8_t)1);
+    int v = (got && Wire.available()) ? Wire.read() : -1;
+    i2c_unlock();
+    Serial.printf("[QMI8658] WHO_AM_I: endTx=%u requested=1 got=%u val=0x%02X (expect 0x05)\n",
+                  et, got, v & 0xFF);
 }
 
 // ─── I2C scan ───────────────────────────────────────────────────────────────
 
 static void i2c_scan(void) {
-    Serial.println("[I2C] scan:");
+    Serial.println("[I2C] scan (addr:endTxCode, 0=ACK):");
+    int found = 0;
     for (uint8_t a = 1; a < 127; a++) {
         Wire.beginTransmission(a);
-        if (Wire.endTransmission(true) == 0) Serial.printf("  0x%02X\n", a);
+        uint8_t e = Wire.endTransmission(true);
+        if (e == 0) { Serial.printf("  0x%02X ACK\n", a); found++; }
     }
+    Serial.printf("[I2C] %d device(s) ACKed\n", found);
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -211,10 +218,14 @@ void setup() {
     Serial.println("=== SETUP ===");
     Serial.flush();
 
+    // Enable internal pull-ups on SDA/SCL before Wire.begin as a safety net.
+    // If the board's external I2C pull-ups are weak/absent, lines float and
+    // register reads come back 0x00/0xFF while address scans still ACK — which
+    // matches the QMI8658 ID=0x00 symptom. ESP32 internal pull-ups are weak
+    // (~45k) but often enough to recover reads at 100 kHz.
+    pinMode(I2C_SHARED_SDA, INPUT_PULLUP);
+    pinMode(I2C_SHARED_SCL, INPUT_PULLUP);
     Wire.begin(I2C_SHARED_SDA, I2C_SHARED_SCL);
-    // Shared bus (touch CST816 + IMU QMI8658) was unreliable at 400 kHz —
-    // QMI8658 ID read returned 0x00 (should be 0x05) and CST816 never showed
-    // on a scan. I2C_FREQ lowered to 100 kHz (pinout.h) for tolerance.
     Wire.setClock(I2C_FREQ);
     i2c_scan();
 
