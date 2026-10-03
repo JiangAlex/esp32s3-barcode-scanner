@@ -364,8 +364,21 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
                 int yc = h / 2;
                 if (y == yc || (i == n_lines/2)) { cmin = lo; cmax = hi; }
             }
-            Serial.printf("[DECODE] 1D diag: %dx%d lines=%d contrast_ok=%d center[min=%d max=%d]\n",
-                          w, h, n_lines, pass, cmin, cmax);
+            // On the center row, binarize at mid-threshold and report the span
+            // between the first and last dark pixel (what the EAN/128 decoders
+            // use as the symbol extent). If this span ~= w, the barcode extent
+            // is contaminated by background darks on the sides → decode fails.
+            {
+                const uint8_t* row = luma + (long)(h/2) * w;
+                int th = (cmin + cmax) / 2;
+                int fb = -1, lb = -1, dark = 0;
+                for (int x = 0; x < w; x++) {
+                    if (row[x] < th) { if (fb < 0) fb = x; lb = x; dark++; }
+                }
+                int span = (fb >= 0) ? (lb - fb + 1) : 0;
+                Serial.printf("[DECODE] 1D diag: %dx%d lines=%d contrast_ok=%d center[min=%d max=%d] span[first=%d last=%d w=%d dark=%d]\n",
+                              w, h, n_lines, pass, cmin, cmax, fb, lb, span, dark);
+            }
         }
 
         if (bc1d_decode_image(luma, w, h, w, n_lines, &r1d)) {
