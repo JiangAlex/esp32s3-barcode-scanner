@@ -305,6 +305,20 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
         int rw = (QW * 7) / 10, rh = (QH * 7) / 10;
         int rx = (QW - rw) / 2, ry = (QH - rh) / 2;
         int base = otsu_threshold_roi(s_luma, QW, QH, rx, ry, rw, rh);
+
+        // DIAGNOSTIC: QR not detecting despite a visibly sharp code. Log the
+        // downscaled luma stats (contrast) and quirc identify count so we can
+        // tell apart: low-contrast luma (bad input), count=0 (finder patterns
+        // not found → sampling/orientation), count>0 but decode fails (ECC).
+        {
+            uint8_t mn = 255, mx = 0; uint32_t acc = 0;
+            for (int i = 0; i < QW * QH; i++) {
+                uint8_t v = s_luma[i];
+                if (v < mn) mn = v; if (v > mx) mx = v; acc += v;
+            }
+            Serial.printf("[DECODE] QR diag: luma min=%u max=%u avg=%lu otsu=%d\n",
+                          mn, mx, (unsigned long)(acc / (QW * QH)), base);
+        }
         const int offs[] = {0, -20, +20, -40, +40};
         uint32_t qr_start = millis();
         for (unsigned k = 0; k < sizeof(offs) / sizeof(offs[0]); k++) {
@@ -315,7 +329,9 @@ DecodeResult barcode_decode_luma(const uint8_t* luma, int w, int h) {
             vTaskDelay(1);
             String content;
             int qr_count = 0;
-            if (qr_try_threshold(s_luma, QW, QH, th, &content, &qr_count)) {
+            bool got = qr_try_threshold(s_luma, QW, QH, th, &content, &qr_count);
+            Serial.printf("[DECODE] QR diag: th=%d count=%d decoded=%d\n", th, qr_count, got);
+            if (got) {
                 result.success = true;
                 result.type = BARCODE_QR_CODE;
                 result.content = content;
