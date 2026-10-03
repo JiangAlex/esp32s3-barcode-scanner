@@ -326,6 +326,15 @@ void setup() {
 }
 
 void loop() {
+    // Heartbeat: confirm loop() is actually running (vs stuck in setup or
+    // superseded by tasks). Prints once per second.
+    {
+        static uint32_t s_hb = 0;
+        if (millis() - s_hb >= 1000) {
+            s_hb = millis();
+            Serial.printf("[LOOP] alive t=%lus\n", millis() / 1000);
+        }
+    }
     // Directly poll the touch controller here so the address probe runs even
     // though LVGL's indev path is tangled (two disp registrations; touch indev
     // commented out). This confirms the touch hardware (0x15 vs 0x7E) from the
