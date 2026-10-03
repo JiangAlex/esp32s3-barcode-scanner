@@ -222,6 +222,18 @@ bool camera_af_probe(void) {
     Serial.printf("[AF] loading AF firmware (%u bytes) into OV5640 MCU...\n",
                   (unsigned)sizeof(ov5640_af_firmware));
 
+    // Enable the VCM (voice-coil motor) driver before loading AF firmware.
+    // The AF MCU firmware runs the focus *algorithm*, but the physical lens
+    // actuator is driven through sensor registers 0x3600/0x3601 (VCM control).
+    // esp32-camera's default OV5640 init does NOT set these (it ships with AF
+    // disabled), so the MCU enters S_FOCUSING but the motor never moves and the
+    // search never converges — exactly the fw_status=0x00-stuck symptom seen on
+    // this FD5640 500W module. Values are from OmniVision's reference init.
+    af_reg_write(s, 0x3600, 0x08);   // VCM control
+    af_reg_write(s, 0x3601, 0x33);   // VCM control
+    Serial.printf("[AF] VCM ctrl set: 0x3600=0x%02x 0x3601=0x%02x\n",
+                  af_reg_read(s, 0x3600) & 0xff, af_reg_read(s, 0x3601) & 0xff);
+
     // Reset the AF MCU, upload firmware to program memory at 0x8000, restart.
     if (!af_reg_write(s, 0x3000, 0x20)) { Serial.println("[AF] MCU reset failed"); return false; }
     uint16_t addr = 0x8000;
