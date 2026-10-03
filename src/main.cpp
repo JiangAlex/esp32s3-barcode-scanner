@@ -194,13 +194,12 @@ static void i2c_scan(void) {
 // ─── Setup ──────────────────────────────────────────────────────────────────
 
 void setup() {
-    // Confirm CPU is running
-    pinMode(48, OUTPUT);
-    digitalWrite(48, HIGH);
-    delay(100);
-    digitalWrite(48, LOW);
-    delay(100);
-    digitalWrite(48, HIGH);
+    // NOTE: do NOT drive GPIO48 here — it is the shared I2C SDA line
+    // (I2C_SHARED_SDA=48). An earlier "CPU alive" blink set GPIO48 as a
+    // push-pull OUTPUT and left it HIGH, corrupting the I2C bus: scans
+    // returned phantom addresses and register reads failed (QMI8658 ID read
+    // back 0x00 instead of 0x05, CST816 @0x15 never appeared). Leave the
+    // I2C pins alone and let Wire.begin() configure them.
 
     // BOOT button (GPIO0, active LOW) — must enable internal pull-up explicitly.
     // GPIO0 is a strapping pin; its pull state after boot is not guaranteed,
