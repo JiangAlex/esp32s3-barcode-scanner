@@ -24,6 +24,8 @@
 #include "power.h"
 #include "camera/camera.h"
 #include "input/touch.h"
+#include "network/wifi_manager.h"
+#include "network/mqtt_client.h"
 
 // ─── I2C ────────────────────────────────────────────────────────────────────
 
@@ -171,6 +173,24 @@ static void lvgl_task(void* param) {
     }
 }
 
+// ─── MQTT query response → UI ────────────────────────────────────────────────
+// Called from the MQTT task context when a warehouse/response arrives. Formats
+// the item fields and shows them on the scan result page. Kept defensive: any
+// missing field falls back to a placeholder.
+static void mqtt_on_response(const char* status, JsonDocument& doc) {
+    if (status && strcmp(status, "ok") == 0) {
+        const char* name     = doc["name"]     | "?";
+        const char* spec     = doc["spec"]     | "";
+        int         qty      = doc["quantity"] | 0;
+        const char* location = doc["location"] | "";
+        char line[128];
+        snprintf(line, sizeof(line), "%s %s x%d @%s", name, spec, qty, location);
+        ui_show_scan_result("Item", line);
+    } else {
+        ui_show_scan_result("Query", status ? status : "not found");
+    }
+}
+
 // ─── QMI8658 IMU ────────────────────────────────────────────────────────────
 
 static void init_qmi8658(void) {
@@ -311,6 +331,14 @@ void setup() {
         Serial.println("[MAIN] Camera init OK");
     }
 
+    // ── Network: WiFi + MQTT ────────────────────────────────────────────────
+    // wifi_manager_init() blocks up to WIFI_CONNECT_TIMEOUT_MS; if the AP is
+    // unreachable it returns and the device runs offline (scans buffered to SD).
+    wifi_manager_init();
+    mqtt_set_response_callback(mqtt_on_response);
+    mqtt_client_init();
+    ui_update_status(wifi_is_connected(), mqtt_is_connected());
+
     Serial.println("=== READY ===");
     g_ui_ready = true;
 
@@ -393,6 +421,19 @@ void loop() {
     // task even without button input, so reset the idle timer each loop there.
     if (ui_get_current_page() == UI_PAGE_SCAN) {
         power_update_idle_time();
+    }
+
+    // ── Network keep-alive ──────────────────────────────────────────────────
+    mqtt_client_loop();   // MQTT keep-alive + auto-reconnect (internally rate-limited)
+
+    // Periodically check WiFi and refresh the status-bar icons (every 3 s).
+    {
+        static uint32_t s_net_last = 0;
+        if (millis() - s_net_last >= 3000) {
+            s_net_last = millis();
+            if (!wifi_is_connected()) wifi_reconnect();
+            ui_update_status(wifi_is_connected(), mqtt_is_connected());
+        }
     }
 
     // Power management: dim/off screen after idle

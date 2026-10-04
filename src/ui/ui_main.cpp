@@ -16,6 +16,7 @@
 #include <freertos/semphr.h>
 #include "config/config.h"
 #include "scan_preview.h"
+#include "network/mqtt_client.h"
 
 // ─── Screen dimensions ────────────────────────────────────────────────────────
 
@@ -607,7 +608,15 @@ void ui_inventory_upload(void) {
     if (g_inv_lbl_status) {
         lv_label_set_text(g_inv_lbl_status, "Uploading...");
     }
-    // TODO: implement upload logic
+    uint16_t n = mqtt_publish_inventory_batch();
+    if (g_inv_lbl_status) {
+        if (n > 0) {
+            lv_label_set_text_fmt(g_inv_lbl_status, "Uploaded %u item(s)", n);
+            ui_inventory_clear();
+        } else {
+            lv_label_set_text(g_inv_lbl_status, "Upload failed (offline?)");
+        }
+    }
 }
 
 void ui_inventory_clear(void) {
@@ -656,13 +665,13 @@ void ui_on_scan(const char* type_name, const char* content) {
 
     switch (g_scan_mode) {
         case SCAN_MODE_QUERY:
-            // Query mode: show the code and a "querying" hint. The MQTT layer
-            // (when connected) publishes the query and updates via the response
-            // handler; here we just reflect the scan + pending state.
+            // Query mode: publish an MQTT query; the response handler
+            // (mqtt_on_response in main.cpp) updates the result via
+            // ui_show_scan_result when the server replies.
             if (g_scan_lbl_info) {
                 lv_label_set_text(g_scan_lbl_info, "Querying warehouse...");
             }
-            // TODO: mqtt_publish_query(content) once MQTT client is wired.
+            mqtt_query_barcode(content);
             break;
 
         case SCAN_MODE_INPUT:
