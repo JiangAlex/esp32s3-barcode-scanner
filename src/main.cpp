@@ -24,7 +24,8 @@
 #include "power.h"
 #include "camera/camera.h"
 #include "input/touch.h"
-#include "network/wifi_manager.h"
+#include "network/wifi_portal/wifi_portal.h"
+#include "network/wifi_manager.h"   // C-style status helpers (wifi_is_connected, etc.)
 #include "network/mqtt_client.h"
 
 // ─── I2C ────────────────────────────────────────────────────────────────────
@@ -191,6 +192,19 @@ static void mqtt_on_response(const char* status, JsonDocument& doc) {
     }
 }
 
+// ─── Captive-portal WiFi manager ─────────────────────────────────────────────
+// Ported from the WT02 project: on boot it loads saved SSID/password from
+// EEPROM and auto-connects; if there is no saved config (or it fails) it opens
+// an AP + web portal ("SoftSnail-Scanner-Setup") so the user can configure WiFi
+// from a phone — no need to hardcode credentials or reflash.
+static WiFiManager g_wifi;
+
+static void on_wifi_connected() {
+    Serial.printf("[WIFI] connected, IP=%s — connecting MQTT\n", g_wifi.getIP().c_str());
+    mqtt_reconnect();
+    ui_update_status(true, mqtt_is_connected());
+}
+
 // ─── QMI8658 IMU ────────────────────────────────────────────────────────────
 
 static void init_qmi8658(void) {
@@ -331,12 +345,14 @@ void setup() {
         Serial.println("[MAIN] Camera init OK");
     }
 
-    // ── Network: WiFi + MQTT ────────────────────────────────────────────────
-    // wifi_manager_init() blocks up to WIFI_CONNECT_TIMEOUT_MS; if the AP is
-    // unreachable it returns and the device runs offline (scans buffered to SD).
-    wifi_manager_init();
+    // ── Network: captive-portal WiFi + MQTT ─────────────────────────────────
+    // g_wifi.begin() auto-connects from saved EEPROM config, or opens the
+    // "SoftSnail-Scanner-Setup" AP + web portal for the user to set WiFi. MQTT
+    // is (re)connected from the onConnected callback and kept alive in loop().
     mqtt_set_response_callback(mqtt_on_response);
     mqtt_client_init();
+    g_wifi.onConnected = on_wifi_connected;
+    g_wifi.begin();
     ui_update_status(wifi_is_connected(), mqtt_is_connected());
 
     Serial.println("=== READY ===");
@@ -424,14 +440,14 @@ void loop() {
     }
 
     // ── Network keep-alive ──────────────────────────────────────────────────
+    g_wifi.loop();        // captive portal requests + connection state machine
     mqtt_client_loop();   // MQTT keep-alive + auto-reconnect (internally rate-limited)
 
-    // Periodically check WiFi and refresh the status-bar icons (every 3 s).
+    // Refresh the status-bar icons periodically (every 3 s).
     {
         static uint32_t s_net_last = 0;
         if (millis() - s_net_last >= 3000) {
             s_net_last = millis();
-            if (!wifi_is_connected()) wifi_reconnect();
             ui_update_status(wifi_is_connected(), mqtt_is_connected());
         }
     }
