@@ -18,6 +18,13 @@ typedef void (*mqtt_response_cb_t)(const char* status, JsonDocument& data);
 void mqtt_client_init(void);
 
 /**
+ * @brief Override the MQTT broker host/port at runtime (e.g. from the WiFi
+ *        config portal). Call before mqtt_client_init()/mqtt_reconnect().
+ *        Empty host or 0 port keeps the current/default value.
+ */
+void mqtt_set_broker(const char* host, uint16_t port);
+
+/**
  * @brief Must be called in loop() for MQTT keep-alive.
  */
 void mqtt_client_loop(void);

@@ -209,6 +209,20 @@ void WiFiManager::handleWiFiSave() {
         // 保存配置
         strncpy(config.ssid, ssid.c_str(), sizeof(config.ssid) - 1);
         strncpy(config.password, password.c_str(), sizeof(config.password) - 1);
+
+        // Optional MQTT broker/port (blank → leave empty so caller uses its default)
+        if (server->hasArg("mqtt_broker")) {
+            String b = server->arg("mqtt_broker");
+            strncpy(config.mqtt_broker, b.c_str(), sizeof(config.mqtt_broker) - 1);
+            config.mqtt_broker[sizeof(config.mqtt_broker) - 1] = '\0';
+        } else {
+            config.mqtt_broker[0] = '\0';
+        }
+        config.mqtt_port = server->hasArg("mqtt_port")
+                               ? (uint16_t)server->arg("mqtt_port").toInt() : 0;
+        Serial.printf("WiFiManager: MQTT broker='%s' port=%u\n",
+                      config.mqtt_broker, config.mqtt_port);
+
         config.valid = true;
         
         saveConfig();
@@ -263,6 +277,9 @@ bool WiFiManager::loadConfig() {
     
     EEPROM.get(SSID_ADDR, config.ssid);
     EEPROM.get(PASSWORD_ADDR, config.password);
+    EEPROM.get(MQTT_BROKER_ADDR, config.mqtt_broker);
+    EEPROM.get(MQTT_PORT_ADDR, config.mqtt_port);
+    config.mqtt_broker[sizeof(config.mqtt_broker) - 1] = '\0';
     config.valid = true;
     
     return true;
@@ -271,6 +288,8 @@ bool WiFiManager::loadConfig() {
 void WiFiManager::saveConfig() {
     EEPROM.put(SSID_ADDR, config.ssid);
     EEPROM.put(PASSWORD_ADDR, config.password);
+    EEPROM.put(MQTT_BROKER_ADDR, config.mqtt_broker);
+    EEPROM.put(MQTT_PORT_ADDR, config.mqtt_port);
     EEPROM.put(CONFIG_FLAG_ADDR, (uint16_t)MAGIC_NUMBER);
     EEPROM.commit();
     

@@ -216,6 +216,16 @@ String WiFiManager::getConfigPage() {
                 <label for="password">Password:</label>
                 <input type="password" id="password" name="password">
             </div>
+
+            <div class="form-group">
+                <label for="mqtt_broker">MQTT Broker (optional):</label>
+                <input type="text" id="mqtt_broker" name="mqtt_broker" placeholder="192.168.1.100">
+            </div>
+
+            <div class="form-group">
+                <label for="mqtt_port">MQTT Port (optional):</label>
+                <input type="text" id="mqtt_port" name="mqtt_port" placeholder="1883">
+            </div>
             
             <button type="submit" class="btn btn-primary">
                 Connect WiFi
@@ -291,6 +301,8 @@ String WiFiManager::getConfigPage() {
             
             var ssid = document.getElementById("ssid").value;
             var password = document.getElementById("password").value;
+            var mqttBroker = document.getElementById("mqtt_broker").value;
+            var mqttPort = document.getElementById("mqtt_port").value;
             
             if (!ssid) {
                 alert("Please enter network name");
@@ -307,6 +319,8 @@ String WiFiManager::getConfigPage() {
                     "Content-Type": "application/x-www-form-urlencoded"
                 },
                 body: "ssid=" + encodeURIComponent(ssid) + "&password=" + encodeURIComponent(password)
+                    + "&mqtt_broker=" + encodeURIComponent(mqttBroker)
+                    + "&mqtt_port=" + encodeURIComponent(mqttPort)
             })
             .then(function(response) {
                 if (response.ok) {

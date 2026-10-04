@@ -38,8 +38,22 @@ static void mqtt_message_cb(char* topic, byte* payload, unsigned int length) {
 
 // ─── Public functions ───────────────────────────────────────────────────────
 
+// Runtime broker config (defaults to config.h; overridable via the WiFi portal
+// through mqtt_set_broker()).
+static char     s_broker[64] = MQTT_BROKER;
+static uint16_t s_port       = MQTT_PORT;
+
+void mqtt_set_broker(const char* host, uint16_t port) {
+    if (host && host[0]) {
+        strncpy(s_broker, host, sizeof(s_broker) - 1);
+        s_broker[sizeof(s_broker) - 1] = '\0';
+    }
+    if (port) s_port = port;
+    Serial.printf("[MQTT] broker set to %s:%u\n", s_broker, s_port);
+}
+
 void mqtt_client_init(void) {
-    mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+    mqtt.setServer(s_broker, s_port);
     mqtt.setCallback(mqtt_message_cb);
     mqtt.setBufferSize(1024);  // Increase buffer for JSON payloads
 

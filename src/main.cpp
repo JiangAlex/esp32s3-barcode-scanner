@@ -347,12 +347,18 @@ void setup() {
 
     // ── Network: captive-portal WiFi + MQTT ─────────────────────────────────
     // g_wifi.begin() auto-connects from saved EEPROM config, or opens the
-    // "SoftSnail-Scanner-Setup" AP + web portal for the user to set WiFi. MQTT
-    // is (re)connected from the onConnected callback and kept alive in loop().
+    // "SoftSnail-Scanner-Setup" AP + web portal for the user to set WiFi AND
+    // the MQTT broker. We read the saved broker before initializing MQTT so a
+    // portal-configured broker overrides the config.h default.
     mqtt_set_response_callback(mqtt_on_response);
-    mqtt_client_init();
     g_wifi.onConnected = on_wifi_connected;
     g_wifi.begin();
+    {
+        String b = g_wifi.getMqttBroker();
+        uint16_t p = g_wifi.getMqttPort();
+        if (b.length() > 0 || p != 0) mqtt_set_broker(b.c_str(), p);
+    }
+    mqtt_client_init();
     ui_update_status(wifi_is_connected(), mqtt_is_connected());
 
     Serial.println("=== READY ===");

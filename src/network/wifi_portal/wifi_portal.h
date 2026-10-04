@@ -18,6 +18,8 @@
 #define SSID_ADDR 0
 #define PASSWORD_ADDR 64
 #define CONFIG_FLAG_ADDR 128
+#define MQTT_BROKER_ADDR 130      // 64 bytes
+#define MQTT_PORT_ADDR 194        // 2 bytes
 #define MAGIC_NUMBER 0xAA55
 
 // WiFi 連接狀態
@@ -34,6 +36,8 @@ enum WiFiManagerStatus {
 struct WiFiConfig {
     char ssid[32];
     char password[64];
+    char mqtt_broker[64];     // MQTT broker host/IP (empty = use config.h default)
+    uint16_t mqtt_port;       // MQTT broker port (0 = use config.h default)
     bool valid;
 };
 
@@ -87,6 +91,9 @@ public:
     bool isPortalActive() { return portalActive; }
     String getSSID() { return String(config.ssid); }
     String getIP() { return WiFi.localIP().toString(); }
+    // MQTT broker config set via the portal (empty/0 if unset → caller uses its default).
+    String getMqttBroker() { return String(config.mqtt_broker); }
+    uint16_t getMqttPort() { return config.mqtt_port; }
     
     // 配置方法
     void setDeviceName(const String& name) { deviceName = name; }
