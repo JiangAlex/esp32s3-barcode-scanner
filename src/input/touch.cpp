@@ -70,62 +70,29 @@ bool touch_init(uint16_t width, uint16_t height, uint8_t rotation) {
         delay(300);
     }
 
-    // ID handshake, bounded retry. The official Waveshare bsp_cst816 loops
-    // `while (bsp_touch_init() == false)` — i.e. it retries the ID read until
-    // the chip answers 0xB6, implying CST816 needs time/retries after power-up
-    // before it responds. We retry for up to ~2 s across BOTH candidate
-    // addresses (0x15 standard, 0x7E seen on this board's scan) and lock onto
-    // whichever returns the expected ID. Bounded (not infinite) so a dead/
-    // absent chip can't hang boot.
-    const uint8_t cand[2] = { 0x15, 0x7E };
+    // ID handshake, bounded retry (official bsp_cst816 retries the ID read
+    // until the chip answers 0xB6). Retry up to ~2 s. On this unit the CST816
+    // never responds on the shared I2C bus (SDA=48/SCL=47) — see docs: the
+    // IMU on the same bus reads fine, the driver matches the official one
+    // verbatim, yet the touch chip gives no ACK/ID. Treated as a hardware
+    // (chip/FPC) issue. We still register/poll so it works if HW is fixed.
     uint32_t t0 = millis();
     bool found = false;
     while ((millis() - t0) < 2000 && !found) {
-        for (int i = 0; i < 2; i++) {
-            uint8_t id = 0;
-            bool ok = cst816_read_at(cand[i], CST816_ID_REG, &id, 1);
-            Serial.printf("[TOUCH] id probe addr=0x%02X read=%s id=0x%02X\n",
-                          cand[i], ok ? "OK" : "FAIL", id);
-            if (ok && id == TOUCH_CHIP_ID) {
-                g_touch_addr = cand[i];
-                found = true;
-                Serial.printf("[TOUCH] CST816 found at 0x%02X (ID 0x%02X)\n", cand[i], id);
-                break;
-            }
+        uint8_t id = 0;
+        if (cst816_read_at(TOUCH_I2C_ADDR, CST816_ID_REG, &id, 1) && id == TOUCH_CHIP_ID) {
+            g_touch_addr = TOUCH_I2C_ADDR;
+            found = true;
         }
-        if (!found) delay(100);
+        if (!found) delay(50);
     }
-    if (!found) {
-        Serial.println("[TOUCH] CST816 not responding on 0x15/0x7E after 2s — enabling anyway (polled)");
-    }
+    Serial.printf("[TOUCH] CST816 %s at 0x%02X\n",
+                  found ? "found" : "NOT responding (hardware?) —",
+                  TOUCH_I2C_ADDR);
     return true;
 }
 
 void touch_read(void) {
-    // DIAGNOSTIC/PROBE: the standard CST816 address 0x15 never ACKs on this
-    // board, but a scan shows 0x7E. Probe both for the touch-count register
-    // and log the raw outcome (success AND failure) so we can see which
-    // address actually responds to a register read. Rate-limited to 1 Hz.
-    static bool s_addr_locked = false;
-    if (!s_addr_locked) {
-        static uint32_t s_last_probe = 0;
-        if (millis() - s_last_probe >= 1000) {
-            s_last_probe = millis();
-            const uint8_t cand[2] = { 0x15, 0x7E };
-            for (int i = 0; i < 2; i++) {
-                uint8_t n = 0;
-                bool ok = cst816_read_at(cand[i], CST816_TOUCH_NUM_REG, &n, 1);
-                Serial.printf("[TOUCH] probe addr=0x%02X read=%s num=%u\n",
-                              cand[i], ok ? "OK" : "FAIL", n);
-                if (ok && n >= 1 && n <= 5) {
-                    g_touch_addr = cand[i];
-                    s_addr_locked = true;
-                    Serial.printf("[TOUCH] locked onto addr 0x%02X\n", cand[i]);
-                }
-            }
-        }
-    }
-
     uint8_t touch_num = 0;
     if (!cst816_read(CST816_TOUCH_NUM_REG, &touch_num, 1) || touch_num == 0) {
         return;
@@ -140,7 +107,6 @@ void touch_read(void) {
     g_raw_x = (uint16_t)((xh & 0x0F) << 8) | xl;
     g_raw_y = (uint16_t)((yh & 0x0F) << 8) | yl;
     g_touch_flag = true;
-    Serial.printf("[TOUCH] down raw=(%u,%u) num=%u\n", g_raw_x, g_raw_y, touch_num);
 }
 
 bool touch_get_coordinates(uint16_t* x, uint16_t* y) {

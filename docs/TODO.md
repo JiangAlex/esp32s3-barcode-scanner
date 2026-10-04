@@ -79,11 +79,16 @@
 
 ## Phase 2: 輸入系統
 
-- [ ] 搖桿 5-way 硬體接線 (GPIO 3/21/33/34/47)
-- [ ] 搖桿驅動 + debounce (20ms)
-- [ ] LVGL indev 註冊 (LV_INDEV_TYPE_KEYPAD)
-- [ ] BOOT 按鍵 (GPIO 0) → LV_KEY_ESC
-- [ ] 長按偵測（BOOT 長按 = 回首頁）
+> ⚠️ **硬體已變更（見決策記錄 2026-08-24）**：分體式搖桿 → 微雪一體板電容觸控（CST816D/GT911）。
+> 以下搖桿項目作廢。目前**實際以 BOOT 單鍵操作**（短按=下一項/切模式、長按=確認/回首頁）。
+
+- [~] BOOT 按鍵（GPIO0）單鍵導航 — 已實作（短按/長按，見 main.cpp loop）
+- [✗] 電容觸控（CST816D）— **硬體不通，軟體已盡力排除**（2026-10-04）。
+  CST816 在共用 I2C bus（SDA=48/SCL=47）完全無回應：0x15/0x7E 位址 ID 讀取 2 秒數十次重試全
+  FAIL。同一條 bus 的 QMI8658 IMU 讀取正常（WHO_AM_I=0x05）、驅動與官方 bsp_cst816 逐字相同
+  → 判定觸控晶片/FPC 硬體故障。驅動碼保留，硬體修好即可用。另註：main.cpp 有雙 disp 註冊、
+  touch indev 被註解（LVGL indev 路徑待整理）。暫以 BOOT 單鍵操作。
+- ~~搖桿 5-way~~ 作廢（硬體無搖桿）
 
 ## Phase 3: UI 頁面
 
@@ -143,12 +148,15 @@
 >- [x] HTTP POST multipart 圖片上傳
 >- [x] 上傳狀態回饋 UI
 
-## Phase 9: 整合測試 ✅
+## Phase 9: 整合測試
 
->- [x] 所有模式切換流程測試
->- [x] BLE HID + WiFi MQTT 同時運作
->- [x] 離線 → 上線同步測試
->- [x] 盤點批次上傳測試
+> ⚠️ **更正（2026-10-04，代碼實證）**：先前標 ✅ 不實。`main.cpp` 從未 init WiFi/MQTT；
+> BLE HID 檔案不存在；`ui_inventory_upload()` 為 TODO 空殼。網路相關整合實際**未完成**。
+
+>- [~] 所有模式切換流程測試 — 模式切換 UI 可切，但查詢/輸入/盤點的後端行為未接
+>- [ ] BLE HID + WiFi MQTT 同時運作 — **未實作**（main 未 init network，無 BLE）
+>- [ ] 離線 → 上線同步測試 — scan_log 有離線暫存，但同步觸發未接 main
+>- [ ] 盤點批次上傳測試 — `ui_inventory_upload()` 為 TODO 空殼
 >- [ ] 長時間運作穩定性
 >- [ ] 記憶體使用監控 (heap free)
 

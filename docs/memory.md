@@ -150,6 +150,16 @@ All phases completed and verified via `pio run` build success.
 - WiFi 重連時自動同步待上傳日誌
 - 盤點批次上傳 MQTT
 
+> ⚠️ **更正（2026-10-04，代碼實證）**：上面「Phase 9 整合」的網路部分**標記不實**。
+> 實際盤點後代碼確認：
+> - `src/network/{wifi_manager,mqtt_client}.cpp` 有實作，但 **`main.cpp` 從未 include/init
+>   這些模組** → WiFi/MQTT **從未在韌體中運行**。
+> - **BLE HID 完全不存在**（無 `ble_hid.*` 檔案，僅 README/config 宣稱）。
+> - `ui_inventory_upload()` 內是 `// TODO: implement upload logic` 空殼 → 盤點上傳未實作。
+> - 狀態列 `[W]`/`[M]` 圖示與 `ui_update_status()` 已畫，但無人呼叫。
+> 真正可運行：顯示、相機、QR 掃描、SD、NVS、低功耗、OTA、拍照 HTTP 上傳。
+> 「掃描查詢(MQTT)/BLE 條碼槍/盤點上傳」三大 README 賣點**尚未接通**。下一步：接 WiFi+MQTT 到 main。
+
 **Phase 10 新增檔案：**
 - `src/ota_update.cpp/.h` — OTA 韌體更新（ESP32 ArduinoOTA）
 - `src/storage/nvs_settings.cpp/.h` — NVS 設定持久化（Preferences）
@@ -525,3 +535,57 @@ RAM 43.5% (142412 / 327680)、Flash 24.3% (763941 / 3145728)。host 1D 測試 24
 - **整合建議**:用 **UART**(僅佔 2 支 GPIO,避開已被 OV5640 相機/SD/觸控佔用的 I2C bus:
   0x6B QMI8658、GT911 等)。讀回字串直接餵現有 `scan_preview_set_decode_cb`。
 - 架構:主 OV5640 維持 QR + 拍照 AI;Unit QRCode 專職 1D(及高可靠度 2D)。
+
+---
+
+# Session 2026-10-04 — 觸控除錯：判定 CST816 硬體不通（+ 修正 I2C/IMU bug）
+
+目標：啟用電容觸控（開機一直 `[TOUCH] CST816 I2C read failed`）。結論：**CST816 觸控晶片在
+此板的共用 I2C bus 上完全無回應，判定硬體（晶片/FPC）故障**。過程中順帶修了兩個真實 bug。
+
+## 過程（每步實機數據）
+
+1. 觸控晶片確認：官方 wiki + reference `bsp_cst816` 證實板子用 **CST816D @ 0x15**，I2C bus
+   SDA=48/SCL=47，驅動 register map/讀法與我們**逐字相同**。
+2. `touch_init` 原本讀 ID 失敗就 return false → LVGL indev 從沒註冊。改為容錯仍註冊。
+3. I2C 降速 400k→100k：無改善。
+4. **真 bug #1**：`setup()` 開頭「CPU alive」把 **GPIO48 設 OUTPUT 拉 HIGH**，但 GPIO48 =
+   I2C SDA！移除（雖非觸控根因，但確實破壞 bus 的隱患）。
+5. **真 bug #2（診斷錯誤）**：我讀 QMI8658 WHO_AM_I 用 reg **0x0F**（錯），正確是 **0x00**。
+   修正後 IMU ID=0x05 正常 → **證明 I2C bus 完全正常**。
+6. 詳細診斷：IMU @0x6B register read OK（endTx=0, got=1, val=0x05）；但觸控 0x15/0x7E
+   register read 全 FAIL。`0x7E` 掃描 ACK 但 register read 失敗 = 非真實暫存器裝置/幻影 ACK。
+7. loop 心跳確認 loop() 有跑；touch_read 直接 poll——probe 仍全 FAIL。
+8. 仿官方 `while` 無限重試邏輯做**有上限 2 秒 ID 握手重試**（跨 0x15/0x7E）：數十次全 FAIL id=0x00。
+   之後 40 秒持續 poll 仍全 FAIL。
+
+## 根本原因（完整證據鏈）
+
+| 驗證 | 結果 |
+|------|------|
+| loop 執行 | ✅ |
+| I2C bus/pull-up/速度 | ✅（QMI8658 @0x6B 讀到 0x05）|
+| 讀取方法 | ✅ 與官方 bsp_cst816 逐字相同 |
+| ID 握手 2s 數十次重試 | ❌ 0x15/0x7E 全 FAIL |
+| 官方初始化漏步驟 | ❌ 無 |
+| **結論** | **CST816 硬體不通（晶片/FPC 故障）** |
+
+## 已修 / 已清理
+
+- 修正：QMI8658 WHO_AM_I reg 0x0F→0x00（IMU 現在讀到 0x05）。
+- 修正：移除 setup 對 GPIO48(SDA) 的 OUTPUT 驅動。
+- I2C 降 100kHz + 內部 pull-up（無害，保留）。
+- touch_init 改容錯 + 2s ID 握手重試（不洗版，印最終結果）；驅動碼完整，硬體修好即可用。
+- 清理所有觸控/loop/I2C 診斷洗版 log。
+
+## 待辦
+
+- **LVGL indev 路徑待整理**：main.cpp 有雙 disp 註冊（display_init 一個 + main 自己一個），
+  touch indev 段被註解（舊 LoadProhibited crash）。即使觸控硬體修好，indev 這條路也要先理清
+  才能讓 LVGL 收到觸控事件。目前 `touch_read` 其實沒被 LVGL 呼叫。
+- 觸控硬體：可燒官方 factory.bin 做最終硬體確認（offset 0x10000）。
+- 暫以 BOOT 單鍵操作。
+
+## build
+
+RAM 43.5% (142412)、Flash 24.3% (764065)。

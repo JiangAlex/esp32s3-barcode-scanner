@@ -174,29 +174,24 @@ static void lvgl_task(void* param) {
 // ─── QMI8658 IMU ────────────────────────────────────────────────────────────
 
 static void init_qmi8658(void) {
-    // DIAGNOSTIC: step through the read manually and report each stage.
-    if (!i2c_lock(-1)) { Serial.println("[QMI8658] i2c lock fail"); return; }
-    Wire.beginTransmission(IMU_I2C_ADDR);
-    Wire.write(0x00);                       // WHO_AM_I (QMI8658 reg 0x00 → 0x05)
-    uint8_t et = Wire.endTransmission(true);
-    uint8_t got = Wire.requestFrom((uint8_t)IMU_I2C_ADDR, (uint8_t)1);
-    int v = (got && Wire.available()) ? Wire.read() : -1;
-    i2c_unlock();
-    Serial.printf("[QMI8658] WHO_AM_I@0x00: endTx=%u got=%u val=0x%02X (expect 0x05)\n",
-                  et, got, v & 0xFF);
+    uint8_t id = 0;
+    if (i2c_reg_read(IMU_I2C_ADDR, 0x00, &id, 1)) {   // WHO_AM_I reg 0x00 → 0x05
+        Serial.printf("[QMI8658] ID=0x%02X %s\n", id, id == 0x05 ? "OK" : "(expected 0x05)");
+    } else {
+        Serial.println("[QMI8658] read failed");
+    }
 }
 
 // ─── I2C scan ───────────────────────────────────────────────────────────────
 
 static void i2c_scan(void) {
-    Serial.println("[I2C] scan (addr:endTxCode, 0=ACK):");
+    Serial.println("[I2C] scan:");
     int found = 0;
     for (uint8_t a = 1; a < 127; a++) {
         Wire.beginTransmission(a);
-        uint8_t e = Wire.endTransmission(true);
-        if (e == 0) { Serial.printf("  0x%02X ACK\n", a); found++; }
+        if (Wire.endTransmission(true) == 0) { Serial.printf("  0x%02X\n", a); found++; }
     }
-    Serial.printf("[I2C] %d device(s) ACKed\n", found);
+    Serial.printf("[I2C] %d device(s)\n", found);
 }
 
 // ─── Setup ──────────────────────────────────────────────────────────────────
@@ -326,26 +321,6 @@ void setup() {
 }
 
 void loop() {
-    // Heartbeat: confirm loop() is actually running (vs stuck in setup or
-    // superseded by tasks). Prints once per second.
-    {
-        static uint32_t s_hb = 0;
-        if (millis() - s_hb >= 1000) {
-            s_hb = millis();
-            Serial.printf("[LOOP] alive t=%lus\n", millis() / 1000);
-        }
-    }
-    // Directly poll the touch controller here so the address probe runs even
-    // though LVGL's indev path is tangled (two disp registrations; touch indev
-    // commented out). This confirms the touch hardware (0x15 vs 0x7E) from the
-    // serial log independent of LVGL. Rate-limit to ~50 Hz.
-    {
-        static uint32_t s_last_touch_poll = 0;
-        if (millis() - s_last_touch_poll >= 20) {
-            s_last_touch_poll = millis();
-            touch_read();
-        }
-    }
     // ── Serial focus calibration ─────────────────────────────────────────
     // This FD5640 module's algorithmic AF does not converge, so focus is a
     // fixed manual VCM position (default 120, near-focus). These serial
