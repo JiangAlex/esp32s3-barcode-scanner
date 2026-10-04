@@ -91,16 +91,21 @@ bool touch_init(uint16_t width, uint16_t height, uint8_t rotation) {
 
 void touch_read(void) {
     // DIAGNOSTIC/PROBE: the standard CST816 address 0x15 never ACKs on this
-    // board, but a scan shows 0x7E. Probe both for the touch-count register;
-    // lock g_touch_addr onto whichever responds with a nonzero touch count.
+    // board, but a scan shows 0x7E. Probe both for the touch-count register
+    // and log the raw outcome (success AND failure) so we can see which
+    // address actually responds to a register read. Rate-limited to 1 Hz.
     static bool s_addr_locked = false;
     if (!s_addr_locked) {
-        const uint8_t cand[2] = { 0x15, 0x7E };
-        for (int i = 0; i < 2; i++) {
-            uint8_t n = 0;
-            if (cst816_read_at(cand[i], CST816_TOUCH_NUM_REG, &n, 1)) {
-                Serial.printf("[TOUCH] probe addr=0x%02X num_reg=%u (readable)\n", cand[i], n);
-                if (n > 0 && n <= 5) {        // plausible touch count → this is it
+        static uint32_t s_last_probe = 0;
+        if (millis() - s_last_probe >= 1000) {
+            s_last_probe = millis();
+            const uint8_t cand[2] = { 0x15, 0x7E };
+            for (int i = 0; i < 2; i++) {
+                uint8_t n = 0;
+                bool ok = cst816_read_at(cand[i], CST816_TOUCH_NUM_REG, &n, 1);
+                Serial.printf("[TOUCH] probe addr=0x%02X read=%s num=%u\n",
+                              cand[i], ok ? "OK" : "FAIL", n);
+                if (ok && n >= 1 && n <= 5) {
                     g_touch_addr = cand[i];
                     s_addr_locked = true;
                     Serial.printf("[TOUCH] locked onto addr 0x%02X\n", cand[i]);
