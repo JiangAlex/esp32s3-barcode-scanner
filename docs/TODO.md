@@ -113,17 +113,22 @@
 - [ ] 語言切換功能
 
 ## Phase 5: 網路與通訊
+> 2026-10-04：WiFi/MQTT 接通 main + 移植 WT02 captive-portal 配網（含 MQTT broker 設定）。
+> 均 `pio run` build 通過；**實機連線尚待驗證**（需真實 AP + MQTT broker）。
 
-- [ ] WiFi 連線管理（自動重連）
-- [ ] MQTT Client（PubSubClient）
-- [ ] MQTT 查詢功能 (publish query → subscribe response)
-- [ ] MQTT 掃描輸入推送 (scan-input topic)
-- [ ] MQTT 盤點上傳 (inventory topic)
-- [ ] HTTP POST 圖片上傳
-- [ ] BLE HID 鍵盤模擬 (ESP32-BLE-Keyboard)
+- [x] WiFi 連線管理 — captive-portal WiFiManager（`src/network/wifi_portal/`，移植自 WT02）：
+  EEPROM 存設定、開機自動連、失敗開 AP「SoftSnail-Scanner-Setup」網頁配網、onConnected callback
+- [x] MQTT Client（PubSubClient）— `mqtt_client.cpp` 接進 main（setup init + loop keep-alive）
+- [x] MQTT 查詢功能 — QUERY 掃描 → `mqtt_query_barcode()`；回應 `mqtt_on_response()` → UI 顯示品項
+- [ ] MQTT 掃描輸入推送 (scan-input topic) — 未做（INPUT 模式目前走 BLE，但 BLE 也未實作）
+- [x] MQTT 盤點上傳 — `ui_inventory_upload()` → `mqtt_publish_inventory_batch()`
+- [x] HTTP POST 圖片上傳 — Phase 8 已有（http_upload.cpp）
+- [x] MQTT broker 可由 portal 設定 — EEPROM 持久化 + `mqtt_set_broker()` runtime 覆蓋
+- [ ] BLE HID 鍵盤模擬 (ESP32-BLE-Keyboard) — **完全未實作**（無 ble_hid 檔案）
 - [ ] BLE 廣播控制 + 配對狀態顯示
 - [ ] BLE HID 後綴設定 (Enter / Tab / None)
 - [ ] WiFi + BLE 共存測試
+- [ ] **實機驗證**：portal 配網 + WiFi 連線 + MQTT 查詢/盤點整條鏈（需真實 AP+broker）
 
 ## Phase 6: 條碼解碼
 

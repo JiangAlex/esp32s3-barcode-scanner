@@ -589,3 +589,55 @@ RAM 43.5% (142412 / 327680)、Flash 24.3% (763941 / 3145728)。host 1D 測試 24
 ## build
 
 RAM 43.5% (142412)、Flash 24.3% (764065)。
+
+---
+
+# Session 2026-10-04 (網路) — 接通 WiFi/MQTT + 移植 captive-portal 配網
+
+延續「文件更正→接通網路」計畫。盤點發現 Phase 9「✅」不實：wifi/mqtt 模組有實作但 main 從未
+init、BLE HID 檔案不存在、ui_inventory_upload 是 TODO 空殼。本 session 把網路接通並升級配網。
+
+## 完成項（均 pio build 通過；實機連線待驗證）
+
+1. **WiFi/MQTT 接進 main**：
+   - setup 原本漏接 → 加 wifi init + `mqtt_client_init()` + response callback。
+   - loop 加 `mqtt_client_loop()` keep-alive + 狀態列 [W]/[M] 更新。
+   - QUERY 掃描接 `mqtt_query_barcode()`（原 TODO 空殼）；回應 `mqtt_on_response()` 格式化
+     品項（name/spec/qty/location）→ `ui_show_scan_result()`。
+   - `ui_inventory_upload()` 接 `mqtt_publish_inventory_batch()`（原空殼）。
+
+2. **captive-portal 配網（移植自 WT02 專案）**：`src/network/wifi_portal/`
+   - WiFiManager class：WebServer+DNSServer captive portal、EEPROM 持久化、掃描/選取 WiFi 網頁、
+     狀態機、onConnected callback。依賴全為 ESP32 Arduino 內建 + ArduinoJson。
+   - 開機從 EEPROM 自動連；無設定/失敗 → 開 AP「SoftSnail-Scanner-Setup / 12345678」網頁配網。
+   - include guard 從 WIFI_MANAGER_H → WIFI_PORTAL_H（與舊 wifi_manager.h 撞名修正）。
+   - 舊 `wifi_manager.cpp` 保留（其 wifi_is_connected() 等 C 查詢函式仍被 mqtt_client 用）。
+
+3. **MQTT broker 納入 portal 設定頁**：
+   - WiFiConfig 加 mqtt_broker[64]/mqtt_port，EEPROM broker@130/port@194 持久化。
+   - 設定頁加兩個選填輸入框；`mqtt_set_broker()` runtime 覆蓋 config.h 預設。
+   - setup 順序：portal begin → 讀 broker → mqtt_set_broker → mqtt_client_init（portal 設定優先）。
+
+## 參考
+
+- WiFi 連線設計參考 WT02 專案 `ProPrj_PLT251129004125-esp32_WT02`
+  （`src/App/Utils/WiFiManager/`）——事件驅動 + captive portal + EEPROM，比寫死 SSID 高明。
+
+## 相關 commit
+
+- `ae753f4` 接 WiFi+MQTT 到 main
+- `ae7d149` 移植 captive-portal WiFiManager
+- `d6c2a78` MQTT broker 納入 portal
+
+## 待辦（下次繼續）
+
+1. **實機驗證**：portal 配網 → WiFi 連線 → MQTT 查詢/盤點整條鏈（需真實 AP + barcode-warehouse-server broker）。
+2. config.h 的 MQTT_BROKER 預設仍是 192.168.1.100；WIFI_SSID 佔位值（現可由 portal 覆蓋，但預設值可更新）。
+3. 查詢結果頁完整欄位 UI（目前塞一行 label）。
+4. BLE HID（README 賣點，完全未實作）→ INPUT 模式無線條碼槍。
+5. 修 README 硬體表（過時 OV2640/ILI9341/搖桿）。
+6. 觸控硬體不通（上一 session 結論）；LVGL 雙 disp/indev 待整理。
+
+## build
+
+RAM 50.5% (165416)、Flash 37.9% (1193145)。
