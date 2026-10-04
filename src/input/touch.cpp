@@ -70,21 +70,33 @@ bool touch_init(uint16_t width, uint16_t height, uint8_t rotation) {
         delay(300);
     }
 
-    uint8_t id = 0;
-    bool id_ok = cst816_read(CST816_ID_REG, &id, 1);
-    // CST816 is a low-power controller: when idle it may not ACK on I2C until
-    // it is first touched, so an ID read at boot often fails even though the
-    // chip is present and works. The official Waveshare bsp_cst816 doesn't gate
-    // on the ID read either. So we DON'T bail out on failure — register the
-    // input device regardless and let touch_read() poll; the panel responds
-    // once a finger is down. Log what we saw for diagnostics.
-    if (!id_ok) {
-        Serial.println("[TOUCH] CST816 ID read failed at boot (chip may be idle; enabling anyway)");
-    } else if (id != TOUCH_CHIP_ID) {
-        Serial.printf("[TOUCH] CST816 ID 0x%02X (expected 0x%02X); enabling anyway\n",
-                      id, TOUCH_CHIP_ID);
-    } else {
-        Serial.println("[TOUCH] CST816D initialized (ID OK)");
+    // ID handshake, bounded retry. The official Waveshare bsp_cst816 loops
+    // `while (bsp_touch_init() == false)` — i.e. it retries the ID read until
+    // the chip answers 0xB6, implying CST816 needs time/retries after power-up
+    // before it responds. We retry for up to ~2 s across BOTH candidate
+    // addresses (0x15 standard, 0x7E seen on this board's scan) and lock onto
+    // whichever returns the expected ID. Bounded (not infinite) so a dead/
+    // absent chip can't hang boot.
+    const uint8_t cand[2] = { 0x15, 0x7E };
+    uint32_t t0 = millis();
+    bool found = false;
+    while ((millis() - t0) < 2000 && !found) {
+        for (int i = 0; i < 2; i++) {
+            uint8_t id = 0;
+            bool ok = cst816_read_at(cand[i], CST816_ID_REG, &id, 1);
+            Serial.printf("[TOUCH] id probe addr=0x%02X read=%s id=0x%02X\n",
+                          cand[i], ok ? "OK" : "FAIL", id);
+            if (ok && id == TOUCH_CHIP_ID) {
+                g_touch_addr = cand[i];
+                found = true;
+                Serial.printf("[TOUCH] CST816 found at 0x%02X (ID 0x%02X)\n", cand[i], id);
+                break;
+            }
+        }
+        if (!found) delay(100);
+    }
+    if (!found) {
+        Serial.println("[TOUCH] CST816 not responding on 0x15/0x7E after 2s — enabling anyway (polled)");
     }
     return true;
 }
