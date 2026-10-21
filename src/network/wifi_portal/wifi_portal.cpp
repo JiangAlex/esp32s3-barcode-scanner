@@ -1,11 +1,30 @@
 #include "wifi_portal.h"
 
+// Translate a wl_status_t into a readable label for diagnostics. The common
+// failure codes: NO_SSID_AVAIL = AP not in range / wrong SSID;
+// CONNECT_FAILED = authentication/password rejected; DISCONNECTED / IDLE =
+// still associating or timed out before completing.
+static const char* wl_status_str(wl_status_t st) {
+    switch (st) {
+        case WL_IDLE_STATUS:   return "IDLE";
+        case WL_NO_SSID_AVAIL: return "NO_SSID_AVAIL (AP not found / wrong SSID)";
+        case WL_SCAN_COMPLETED:return "SCAN_COMPLETED";
+        case WL_CONNECTED:     return "CONNECTED";
+        case WL_CONNECT_FAILED:return "CONNECT_FAILED (auth/password rejected)";
+        case WL_CONNECTION_LOST:return "CONNECTION_LOST";
+        case WL_DISCONNECTED:  return "DISCONNECTED (associating / timed out)";
+        case WL_NO_SHIELD:     return "NO_SHIELD";
+        default:               return "UNKNOWN";
+    }
+}
+
 WiFiManager::WiFiManager() {
     server = nullptr;
     dnsServer = nullptr;
     status = WM_IDLE;
     portalActive = false;
     autoConnect = true;
+    pendingApply = false;
     deviceName = "ESP32-OffLineMap";
     
     // 初始化配置
@@ -53,7 +72,30 @@ void WiFiManager::loop() {
         if (dnsServer) {
             dnsServer->processNextRequest();
         }
-        
+
+        // Deferred credential-apply (set by handleWiFiSave). Safe here: we are
+        // no longer inside the request handler, so tearing down the WebServer
+        // cannot corrupt an in-flight response. Pump the client briefly first
+        // so the success page is actually delivered before we stop the portal.
+        if (pendingApply) {
+            pendingApply = false;
+            unsigned long t0 = millis();
+            while (millis() - t0 < 1500) {
+                server->handleClient();
+                if (dnsServer) dnsServer->processNextRequest();
+                delay(10);
+            }
+            stopConfigPortal();
+            autoConnectToWiFi();
+            if (status == WM_CONNECTED && onConnected) {
+                onConnected();
+            } else if (status != WM_CONNECTED) {
+                // Reconnect failed → reopen the portal for another attempt.
+                startConfigPortal();
+            }
+            return;
+        }
+
         // 檢查入口超時
         if (millis() - portalStartTime > WIFI_MANAGER_PORTAL_TIMEOUT) {
             Serial.println("WiFiManager: Portal timeout, restarting config portal");
@@ -88,28 +130,40 @@ bool WiFiManager::autoConnectToWiFi() {
     }
     
     Serial.printf("WiFiManager: Connecting to %s...\n", config.ssid);
-    
+
+    // Clean, minimal STA setup. (An earlier aggressive teardown that forced
+    // WIFI_OFF between attempts corrupted the net stack — "netstack cb reg
+    // failed 12308" and scans returning empty — so we keep this standard.)
+    WiFi.persistent(false);           // don't thrash NVS on each attempt
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);            // disable modem sleep during association
     WiFi.begin(config.ssid, config.password);
     
     status = WM_CONNECTING;
     connectStartTime = millis();
     
-    // 等待連接結果
+    // 等待連接結果 — up to ~15s (30 x 500ms). Diagnostic: print the raw
+    // wl_status_t each poll so we can distinguish "wrong password"
+    // (WL_CONNECT_FAILED=4) from "AP not found" (WL_NO_SSID_AVAIL=1) from a
+    // plain association timeout (stays WL_DISCONNECTED=6 / WL_IDLE_STATUS=0).
+    // NOTE: never log the password itself — only status codes.
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    wl_status_t st = WiFi.status();
+    while (st != WL_CONNECTED && attempts < 30) {
         delay(500);
-        Serial.print(".");
+        st = WiFi.status();
+        Serial.printf(". st=%d\n", (int)st);
         attempts++;
     }
     
-    if (WiFi.status() == WL_CONNECTED) {
+    if (st == WL_CONNECTED) {
         status = WM_CONNECTED;
         Serial.printf("\nWiFiManager: Connected! IP: %s\n", WiFi.localIP().toString().c_str());
         return true;
     } else {
         status = WM_FAILED;
-        Serial.println("\nWiFiManager: Connection failed");
+        Serial.printf("\nWiFiManager: Connection failed (final status=%d: %s)\n",
+                      (int)st, wl_status_str(st));
         return false;
     }
 }
@@ -228,11 +282,13 @@ void WiFiManager::handleWiFiSave() {
         saveConfig();
         
         server->send(200, "text/html", getSuccessPage());
-        
-        // 延遲後嘗試連接
-        delay(2000);
-        stopConfigPortal();
-        autoConnectToWiFi();
+
+        // IMPORTANT: do NOT stopConfigPortal()/reconnect here — we are still
+        // inside server->handleClient(). Deleting the WebServer now would make
+        // _finalizeResponse() run on freed memory (LoadProhibited crash).
+        // Defer the actual apply to loop(), which runs after handleClient()
+        // returns and the response has been flushed.
+        pendingApply = true;
     } else {
         Serial.println("WiFiManager: Missing SSID or password parameters");
         server->send(400, "text/html", "<h1>Missing parameters</h1>");

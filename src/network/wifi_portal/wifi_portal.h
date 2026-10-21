@@ -52,6 +52,12 @@ private:
     bool portalActive;
     bool autoConnect;
     String deviceName;
+
+    // Deferred credential-apply: a request handler must NOT delete the
+    // WebServer it is currently running inside (use-after-free → LoadProhibited
+    // in _finalizeResponse). handleWiFiSave() only sets this flag; loop()
+    // performs stopConfigPortal() + reconnect after handleClient() returns.
+    bool pendingApply = false;
     
     // 私有方法
     void setupAP();

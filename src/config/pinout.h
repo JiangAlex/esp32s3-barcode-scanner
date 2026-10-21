@@ -74,7 +74,10 @@
 #define SD_PIN_CS           41
 
 // SD SPI frequency
-#define SD_SPI_FREQ         20000000   // 20MHz
+#define SD_SPI_FREQ         4000000    // 4MHz — 20MHz caused writes to not commit
+                                       // (print returns N bytes but file stays
+                                       // 0; shared-bus signal integrity). 4MHz
+                                       // is the safe/standard SD-over-SPI rate.
 
 // ─── Shared I2C bus (Touch + IMU) ───────────────────────────────────────────
 

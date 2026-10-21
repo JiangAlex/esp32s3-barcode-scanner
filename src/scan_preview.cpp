@@ -65,6 +65,13 @@ SemaphoreHandle_t s_spi_mutex = nullptr;
 static scan_decode_cb_t s_decode_cb = nullptr;
 static bool s_decoder_ready = false;
 
+// Decode dedup/cooldown: suppress re-firing the callback for the SAME content
+// within SCAN_COOLDOWN_MS. Without this, continuous scanning of one barcode
+// fires the callback every frame, so a query/stock result flashes and is
+// instantly overwritten by the next identical scan.
+static String        s_last_content;
+static unsigned long s_last_decode_ms = 0;
+
 // SVGA luma buffer (PSRAM). Allocated lazily on the first hi-res attempt.
 static uint8_t* s_hires_luma = nullptr;
 static bool     s_af_available = false;   // set by scan_preview_start from probe
@@ -127,6 +134,17 @@ static bool decode_current_frame(camera_fb_t* fb) {
     rgb565_to_luma_local((const uint16_t*)fb->buf, s_hires_luma, HIRES_W * HIRES_H);
     DecodeResult res = barcode_decode_luma(s_hires_luma, HIRES_W, HIRES_H);
     if (res.success && res.content.length() > 0 && s_decode_cb) {
+        // Dedup/cooldown: ignore the same code decoded again within the window
+        // so the on-screen result (query item / stock ack) is not overwritten
+        // by continuous re-scans of the same barcode.
+        unsigned long now = millis();
+        if (res.content == s_last_content &&
+            (now - s_last_decode_ms) < SCAN_COOLDOWN_MS) {
+            return false;   // suppressed duplicate; keep current display
+        }
+        s_last_content   = res.content;
+        s_last_decode_ms = now;
+
         s_decode_cb(res.type_name.c_str(), res.content.c_str());
         Serial.println("[PREVIEW] scan: DECODED");
         return true;
@@ -367,7 +385,15 @@ void scan_preview_start(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
 
     // Allocate shared framebuffer in DRAM (VF_W * VF_H * 2 bytes)
     if (!s_framebuf) {
-        s_framebuf = (uint8_t*)malloc(VF_W * VF_H * 2);
+        // Allocate the viewfinder framebuffer (VF_W*VF_H*2 = 60KB) in PSRAM, not
+        // DRAM. It is only read by the render task for LovyanGFX writePixels (no
+        // DRAM-only DMA constraint here), so PSRAM is fine — and this frees ~60KB
+        // of scarce internal DRAM for the BLE HID stack in INPUT mode.
+        s_framebuf = (uint8_t*)heap_caps_malloc(VF_W * VF_H * 2, MALLOC_CAP_SPIRAM);
+        if (!s_framebuf) {
+            // Fall back to DRAM if PSRAM is unavailable.
+            s_framebuf = (uint8_t*)malloc(VF_W * VF_H * 2);
+        }
         if (!s_framebuf) {
             Serial.println("[PREVIEW] FAILED to allocate shared framebuffer");
             return;

@@ -27,6 +27,9 @@
 #include "network/wifi_portal/wifi_portal.h"
 #include "network/wifi_manager.h"   // C-style status helpers (wifi_is_connected, etc.)
 #include "network/mqtt_client.h"
+#include "network/ble_hid.h"
+#include "storage/sd_card.h"
+#include "storage/scan_log.h"
 
 // ─── I2C ────────────────────────────────────────────────────────────────────
 
@@ -124,37 +127,10 @@ static void toggle_scan(void) {
     Serial.printf("[SCAN] toggled: %s\n", g_scanning ? "ON" : "OFF");
 }
 
-// ─── LVGL draw buffers (factory style: MALLOC_CAP_SPIRAM) ────────────────────
-// heap_caps_malloc with MALLOC_CAP_SPIRAM falls back to DRAM if PSRAM absent
-
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t* buf1 = nullptr;
-static lv_color_t* buf2 = nullptr;
-
-// ─── LVGL display driver ─────────────────────────────────────────────────────
-
-static void flush_cb(lv_disp_drv_t* d, const lv_area_t* a, lv_color_t* c) {
-    uint32_t w=a->x2-a->x1+1, h=a->y2-a->y1+1;
-    uint32_t npixels = w * h;
-    static uint32_t cnt = 0;
-    if (cnt < 5) {
-        Serial.printf("[FLUSH] #%u %ux%u px=0x%04X\n", cnt, w, h, c[0].full);
-        cnt++;
-    }
-    tft.startWrite();
-    tft.setAddrWindow(a->x1,a->y1,w,h);
-    tft.writePixels((uint16_t*)c, npixels);
-    tft.endWrite();
-    lv_disp_flush_ready(d);
-}
-
-// ─── LVGL tick timer (factory style: esp_timer every 2ms) ────────────────────
-
-static void lvgl_tick_cb(void* arg) {
-    lv_tick_inc(2);  // 2ms period
-}
-
 // ─── LVGL task (factory style: Core 1 + recursive mutex) ────────────────────
+// The LVGL display driver, draw buffers, touch indev, flush callback and the
+// esp_timer tick all live in display.cpp (display_init), which is the single
+// source of truth. main.cpp only drives the LVGL handler loop below.
 
 static void lvgl_task(void* param) {
     Serial.println("[LVGL] task started on Core 1");
@@ -179,17 +155,68 @@ static void lvgl_task(void* param) {
 // the item fields and shows them on the scan result page. Kept defensive: any
 // missing field falls back to a placeholder.
 static void mqtt_on_response(const char* status, JsonDocument& doc) {
-    if (status && strcmp(status, "ok") == 0) {
-        const char* name     = doc["name"]     | "?";
-        const char* spec     = doc["spec"]     | "";
-        int         qty      = doc["quantity"] | 0;
-        const char* location = doc["location"] | "";
-        char line[128];
-        snprintf(line, sizeof(line), "%s %s x%d @%s", name, spec, qty, location);
-        ui_show_scan_result("Item", line);
-    } else {
-        ui_show_scan_result("Query", status ? status : "not found");
+    // Server query contract (see barcode-warehouse-server/src/mqtt_handler.py):
+    //   found     → {"status":"found","data":{barcode,name,spec,quantity,location,supplier,date_in}}
+    //   not_found → {"status":"not_found","barcode":...,"message":...}
+    //   error     → {"status":"error","message":...}
+    // Stock / stocktake acks carry their result inside "data" as well and are
+    // dispatched to the UI state machine (see below).
+    if (status && strcmp(status, "found") == 0) {
+        JsonObjectConst data = doc["data"];
+        const char* barcode  = data["barcode"]  | "";
+        const char* name     = data["name"]     | "?";
+        const char* spec     = data["spec"]     | "";
+        int         qty      = data["quantity"] | 0;
+        const char* location = data["location"] | "";
+        const char* supplier = data["supplier"] | "";
+        const char* date_in  = data["date_in"]  | "";
+        // Post the structured item; the LVGL task switches to the RESULT page
+        // and populates the 6 fields (see ui_process_pending_scan).
+        ui_post_result_item(barcode, name, spec, qty, location, supplier, date_in);
+        return;
     }
+
+    if (status && strcmp(status, "not_found") == 0) {
+        ui_post_result("Query", "Not found");
+        return;
+    }
+
+    // Stock-in / stock-out acks: show the resulting quantity.
+    if (status && (strcmp(status, "stock_in_ok") == 0 ||
+                   strcmp(status, "stock_out_ok") == 0)) {
+        JsonObjectConst data = doc["data"];
+        const char* name = data["name"]     | "?";
+        int         qty  = data["quantity"] | 0;
+        bool        in   = strcmp(status, "stock_in_ok") == 0;
+        char line[128];
+        snprintf(line, sizeof(line), "%s qty=%d", name, qty);
+        ui_post_result(in ? "Stock-in" : "Stock-out", line);
+        return;
+    }
+
+    // Stocktake session lifecycle → drive the firmware stocktake state machine.
+    if (status && strcmp(status, "stocktake_started") == 0) {
+        int session_id = doc["data"]["session_id"] | 0;
+        ui_stocktake_on_started(session_id);
+        return;
+    }
+    if (status && strcmp(status, "stocktake_scanned") == 0) {
+        JsonObjectConst data = doc["data"];
+        const char* name = data["name"]       | "?";
+        int sys_qty      = data["system_qty"] | 0;
+        int act_qty      = data["actual_qty"] | 0;
+        int diff         = data["difference"] | 0;
+        ui_stocktake_on_scanned(name, sys_qty, act_qty, diff);
+        return;
+    }
+    if (status && strcmp(status, "stocktake_ended") == 0) {
+        ui_stocktake_on_ended();
+        return;
+    }
+
+    // Fallback: surface whatever status / message the server sent.
+    const char* msg = doc["message"] | (status ? status : "error");
+    ui_post_result("Server", msg);
 }
 
 // ─── Captive-portal WiFi manager ─────────────────────────────────────────────
@@ -201,6 +228,14 @@ static WiFiManager g_wifi;
 
 static void on_wifi_connected() {
     Serial.printf("[WIFI] connected, IP=%s — connecting MQTT\n", g_wifi.getIP().c_str());
+
+    // Sync the system clock via NTP so the work log uses real dates/times.
+    // Without this, time(nullptr) sits near the 1970 epoch and every log entry
+    // (and the YYYY-MM-DD.json filename) would be wrong. TZ = Taiwan (CST-8,
+    // no DST). configTzTime applies the POSIX TZ string and starts SNTP.
+    configTzTime("CST-8", "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+    Serial.println("[TIME] NTP sync requested (TZ=CST-8)");
+
     mqtt_reconnect();
     ui_update_status(true, mqtt_is_connected());
 }
@@ -271,69 +306,26 @@ void setup() {
     // Initialize NVS settings persistence
     nvs_init();
 
+    // Mount the SD card (shares the FSPI bus with the LCD; must come after
+    // display_init so LovyanGFX owns/configures the shared bus first) and
+    // initialize the work-log subsystem. If no card is present these fail
+    // gracefully and logging is simply disabled.
+    if (sd_card_init()) {
+        Serial.printf("[MAIN] SD mounted: %u/%u MB used\n",
+                      sd_card_used_mb(), sd_card_total_mb());
+        scan_log_init();
+    } else {
+        Serial.println("[MAIN] SD not available — work log disabled");
+    }
+
     // Initialize power management
     power_init();
 
-    // LVGL draw buffers — factory style (MALLOC_CAP_SPIRAM, 1/4 screen each)
-    // PSRAM: use PSRAM if available, else DRAM
-    // Note: DRAM is ~328KB total, need to fit 2 buffers + LVGL heap + app heap
-    size_t buf_size = (TFT_WIDTH * TFT_HEIGHT / 4) * sizeof(lv_color_t);  // 1/4 screen = ~37.5KB
-    buf1 = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    buf2 = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    Serial.printf("[LVGL] buf1=%p buf2=%p (PSRAM buffers, %d bytes each)\n",
-                  (void*)buf1, (void*)buf2, (int)buf_size);
-    if (!buf1) { free(buf2); buf2 = nullptr; }
-    if (!buf1 || !buf2) {
-        Serial.println("[LVGL] PSRAM alloc failed, using DRAM");
-        free(buf1); free(buf2);
-        buf1 = (lv_color_t*)malloc(buf_size);
-        buf2 = (lv_color_t*)malloc(buf_size);
-        Serial.printf("[LVGL] DRAM buf1=%p buf2=%p\n", (void*)buf1, (void*)buf2);
-    }
-    if (!buf1 || !buf2) {
-        Serial.println("[LVGL] FATAL: buffer alloc failed");
-        while(1) delay(1000);
-    }
-
-    // LVGL init
+    // LVGL (init, draw buffers, display driver, touch indev, and the esp_timer
+    // tick) is fully set up inside display_init() above — it is the single
+    // source of truth. We only create the recursive lock used by lvgl_task()
+    // to serialize LVGL calls from Core 1.
     g_lvgl_mux = xSemaphoreCreateRecursiveMutex();
-    lv_init();
-    size_t buf_pixels = TFT_WIDTH * TFT_HEIGHT / 4;  // 1/4 screen in pixels
-    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, buf_pixels);
-
-    // Display driver
-    lv_disp_drv_t dd; lv_disp_drv_init(&dd);
-    dd.hor_res = TFT_WIDTH; dd.ver_res = TFT_HEIGHT;
-    dd.flush_cb = flush_cb; dd.draw_buf = &draw_buf;
-    dd.full_refresh = 0;  // normal rendering
-    lv_disp_t* disp = lv_disp_drv_register(&dd);
-
-    // Touch driver (placeholder — no CST816 on this board)
-    // NOTE: LVGL indev timer calls read_cb even if no touch hardware.
-    // For minimal test without input device, skip indev registration entirely.
-    // The read_cb lambda was causing LoadProhibited crashes.
-    // Leaving this section empty until we confirm touch hardware.
-    // lv_indev_drv_t id; lv_indev_drv_init(&id);
-    // id.type = LV_INDEV_TYPE_POINTER;
-    // id.disp = disp;
-    // id.read_cb = [](lv_indev_drv_t* d, lv_indev_data_t* data) {
-    //     data->state = LV_INDEV_STATE_RELEASED;
-    // };
-    // lv_indev_drv_register(&id);
-    (void)disp;  // suppress unused variable warning
-
-    // LVGL tick timer (factory style: esp_timer every 2ms)
-    // Do NOT use LV_TICK_CUSTOM=1 — factory uses esp_timer
-    const esp_timer_create_args_t timer_args = {
-        .callback = &lvgl_tick_cb,
-        .name = "lvgl_tick"
-    };
-    esp_timer_handle_t tick_timer = nullptr;
-    esp_timer_create(&timer_args, &tick_timer);
-    esp_timer_start_periodic(tick_timer, 2000);  // 2ms = 2000us
-
-    Serial.println("[LVGL] tick timer started (esp_timer 2ms)");
-    Serial.flush();
 
     // ─── LVGL UI (single-button navigation) ────────────────────────────────────
     ui_main_init();
@@ -361,6 +353,27 @@ void setup() {
     mqtt_client_init();
     ui_update_status(wifi_is_connected(), mqtt_is_connected());
 
+    // When BLE HID (INPUT mode) stops, it has fully released the WiFi driver to
+    // free DRAM; re-establish WiFi + MQTT here.
+    ble_hid_set_stopped_cb([]() {
+        Serial.println("[BLE] stopped — re-establishing WiFi");
+        // ble_hid_begin() released WiFi via WiFi.mode(WIFI_OFF) (Arduino class
+        // stays in sync). Re-init the STA driver then reconnect.
+        WiFi.mode(WIFI_STA);
+        delay(100);
+        g_wifi.begin();
+        mqtt_client_init();
+    });
+
+    // Settings page "WiFi" row opens the web config portal on-demand. All
+    // detailed config (SSID/password/MQTT broker) is entered in the portal.
+    // startConfigPortal() only brings up the AP + web server; g_wifi.loop()
+    // (driven in loop()) services it.
+    ui_set_wifi_portal_cb([]() {
+        Serial.println("[WIFI] opening config portal (from settings)");
+        g_wifi.startConfigPortal();
+    });
+
     Serial.println("=== READY ===");
     g_ui_ready = true;
 
@@ -371,40 +384,90 @@ void setup() {
 }
 
 void loop() {
-    // ── Serial focus calibration ─────────────────────────────────────────
-    // This FD5640 module's algorithmic AF does not converge, so focus is a
-    // fixed manual VCM position (default 120, near-focus). These serial
-    // commands let it be re-calibrated for a specific scan distance:
-    //   '+' / '='  : focus nearer (VCM += 10)
-    //   '-'        : focus farther (VCM -= 10)
-    //   digits + Enter (e.g. "300\n") : set VCM to that absolute value
-    //   'p'        : print current VCM
+    // ── Serial console ───────────────────────────────────────────────────
+    // Focus calibration AND a test hook to inject a barcode as if scanned:
+    //   '+' / '='              : focus nearer (VCM += 10)   [single char]
+    //   '-'                    : focus farther (VCM -= 10)  [single char]
+    //   'p'                    : print current VCM          [single char]
+    //   digits + Enter         : set VCM absolute (e.g. "300")
+    //   any other text + Enter : treat as a scanned barcode (e.g. "RAC-28VP")
+    // Single-char focus keys act immediately; everything else is line-buffered
+    // until Enter so barcodes containing '-'/digits aren't eaten by the focus
+    // commands.
     {
-        static int  s_num = -1;             // accumulating numeric entry
+        static char s_line[160];
+        static size_t s_len = 0;
         while (Serial.available() > 0) {
             char c = (char)Serial.read();
-            if (c >= '0' && c <= '9') {
-                if (s_num < 0) s_num = 0;
-                s_num = s_num * 10 + (c - '0');
-                if (s_num > 1023) s_num = 1023;
-            } else if (c == '\n' || c == '\r') {
-                if (s_num >= 0) {
-                    camera_af_set_manual((uint16_t)s_num);
-                    Serial.printf("[FOCUS] VCM=%u (set)\n", (unsigned)s_num);
-                    s_num = -1;
+
+            if (c == '\n' || c == '\r') {
+                if (s_len == 0) continue;        // ignore blank line
+                s_line[s_len] = '\0';
+                // Classify the completed line.
+                bool all_digits = true;
+                for (size_t i = 0; i < s_len; i++) {
+                    if (s_line[i] < '0' || s_line[i] > '9') { all_digits = false; break; }
                 }
-            } else if (c == '+' || c == '=') {
-                uint16_t v = camera_af_get_manual();
-                v = (v > 1013) ? 1023 : v + 10;
-                camera_af_set_manual(v);
-                Serial.printf("[FOCUS] VCM=%u (nearer)\n", v);
-            } else if (c == '-') {
-                uint16_t v = camera_af_get_manual();
-                v = (v < 10) ? 0 : v - 10;
-                camera_af_set_manual(v);
-                Serial.printf("[FOCUS] VCM=%u (farther)\n", v);
-            } else if (c == 'p') {
-                Serial.printf("[FOCUS] current VCM=%u\n", camera_af_get_manual());
+                if (all_digits) {
+                    int v = atoi(s_line);
+                    if (v > 1023) v = 1023;
+                    camera_af_set_manual((uint16_t)v);
+                    Serial.printf("[FOCUS] VCM=%u (set)\n", (unsigned)v);
+                } else {
+                    // Treat as a barcode: inject into the scan pipeline.
+                    Serial.printf("[SERIAL] inject barcode: %s\n", s_line);
+                    ui_inject_scan("SERIAL", s_line);
+                }
+                s_len = 0;
+            } else if (s_len == 0 && (c == '+' || c == '=' || c == '-' || c == 'p')) {
+                // Single-char focus command (only when no line is in progress).
+                if (c == 'p') {
+                    Serial.printf("[FOCUS] current VCM=%u\n", camera_af_get_manual());
+                } else if (c == '-') {
+                    uint16_t v = camera_af_get_manual();
+                    v = (v < 10) ? 0 : v - 10;
+                    camera_af_set_manual(v);
+                    Serial.printf("[FOCUS] VCM=%u (farther)\n", v);
+                } else {  // '+' or '='
+                    uint16_t v = camera_af_get_manual();
+                    v = (v > 1013) ? 1023 : v + 10;
+                    camera_af_set_manual(v);
+                    Serial.printf("[FOCUS] VCM=%u (nearer)\n", v);
+                }
+            } else if (s_len == 0 && (c == 'n' || c == 'c' || c == 'h')) {
+                // Single-char navigation command (emulates the BOOT key over
+                // serial, for testing without physical access):
+                //   n = NAV_NEXT (short press), c = NAV_CONFIRM (long press),
+                //   h = NAV_HOME (long hold).
+                if (c == 'n')      { Serial.println("[SERIAL] NAV_NEXT");    ui_nav_event(NAV_NEXT); }
+                else if (c == 'c') { Serial.println("[SERIAL] NAV_CONFIRM"); ui_nav_event(NAV_CONFIRM); }
+                else               { Serial.println("[SERIAL] NAV_HOME");    ui_nav_event(NAV_HOME); }
+            } else if (s_len == 0 && (c == 'b' || c == 'B' || c == 't' || c == 's')) {
+                // BLE HID PoC commands (testing):
+                //   b = begin/advertise, B = stop, t = type a test string,
+                //   s = status + free heap.
+                if (c == 'b')      { ble_hid_begin(); }
+                else if (c == 'B') { ble_hid_stop(); }
+                else if (c == 't') {
+                    Serial.printf("[SERIAL] BLE type test (connected=%d)\n",
+                                  ble_hid_is_connected());
+                    ble_hid_type_line("SoftSnail-BLE-TEST-123");
+                } else {  // 's'
+                    Serial.printf("[SERIAL] BLE started=%d connected=%d | heap total=%u internal=%u psram=%u\n",
+                                  ble_hid_is_started(), ble_hid_is_connected(),
+                                  (unsigned)ESP.getFreeHeap(),
+                                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                }
+            } else if (s_len == 0 && c == 'd') {
+                // Dump today's work log from SD (diagnostic).
+                String js = scan_log_read(nullptr, 0, 100);
+                Serial.printf("[SERIAL] today's log: %s\n", js.c_str());
+            } else {
+                // Accumulate into the line buffer (barcode or multi-digit VCM).
+                if (s_len < sizeof(s_line) - 1) {
+                    s_line[s_len++] = c;
+                }
             }
         }
     }

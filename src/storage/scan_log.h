@@ -26,6 +26,14 @@ void scan_log_init(void);
 void scan_log_add(const DecodeResult& result);
 
 /**
+ * @brief Log a scan event from plain strings (UI layer, no decoder dependency).
+ *        Writes the same JSON line as scan_log_add() to today's log + pending.
+ * @param type    Short type/action tag (e.g. "QUERY", "QR", "IN").
+ * @param content Scanned barcode/content string.
+ */
+void scan_log_add_entry(const char* type, const char* content);
+
+/**
  * @brief Get total number of logged scans (all files).
  */
 uint32_t scan_log_count(void);
@@ -38,6 +46,12 @@ uint32_t scan_log_count(void);
  * @return JSON array string of scan entries
  */
 String scan_log_read(const char* date, uint32_t offset, uint32_t limit);
+
+/**
+ * @brief Fill buf with the date string "YYYY-MM-DD" for a day offset relative
+ *        to today (0 = today, -1 = yesterday, ...). Uses the synced clock.
+ */
+void scan_log_date_for_offset(int day_offset, char* buf, size_t len);
 
 /**
  * @brief Read pending (offline) queue entries as JSON array.

@@ -1,0 +1,2838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Barcode Scanner — Web LVGL Simulator</title>
+<style>
+  /* ── Reset & Layout ─────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0a0a12;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #ccc;
+    user-select: none;
+  }
+
+  /* ── Device Frame ─────────────────────────────────────────── */
+  .device {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .device-label {
+    font-size: 11px;
+    color: #444;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* ── Device Selector ──────────────────────────────────────── */
+  #device-selector {
+    background: #111;
+    color: #07e0;
+    border: 1px solid #333;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    outline: none;
+    margin-bottom: 4px;
+  }
+  #device-selector:hover { border-color: #07e0; }
+  #device-selector option { background: #111; color: #ccc; }
+
+  /* ── Screen wrapper (holds both screens, overlapping) ──────── */
+  #screen-wrapper {
+    position: relative;
+    width: 240px;
+    height: 320px;
+  }
+
+  /* ── LCD Screen — Barcode Scanner (ILI9341 240×320) ──────── */
+  .screen {
+    position: absolute;
+    top: 0; left: 0;
+    width: 240px;
+    height: 320px;
+    background: #000;
+    border: 3px solid #1a1a2e;
+    border-radius: 4px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px #0d0d1a,
+      0 8px 32px rgba(0,0,0,0.8),
+      inset 0 0 60px rgba(0,0,0,0.4);
+    image-rendering: pixelated;
+  }
+  .screen.hidden { display: none; }
+
+  /* LCD pixel grid overlay */
+  #barcode-screen::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image:
+      repeating-linear-gradient(0deg, transparent, transparent 1px, rgba(0,0,0,0.08) 1px, rgba(0,0,0,0.08) 2px),
+      repeating-linear-gradient(90deg, transparent, transparent 1px, rgba(0,0,0,0.08) 1px, rgba(0,0,0,0.08) 2px);
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  /* ── Status Bar (24px) — Barcode Scanner ──────────────────── */
+  #barcode-status-bar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 24px;
+    background: #7bef;
+    display: flex;
+    align-items: center;
+    padding: 0 6px;
+    z-index: 2;
+    gap: 2px;
+  }
+
+  #barcode-status-title {
+    font-size: 10px;
+    color: #000;
+    font-weight: bold;
+    flex: 1;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .status-icon {
+    font-size: 9px;
+    font-weight: bold;
+    cursor: default;
+  }
+  #wifi-icon  { color: #000; }
+  #mqtt-icon  { color: #000; }
+  #ble-icon   { color: #000; }
+  #sync-icon  { color: #000; font-size: 8px; }
+  #clock-label { font-size: 9px; color: #000; margin-left: auto; }
+
+  /* ── Page Container ───────────────────────────────────────── */
+  #barcode-page-container {
+    position: absolute;
+    top: 24px; left: 0; right: 0; bottom: 0;
+    overflow: hidden;
+  }
+
+  /* ── Page common ──────────────────────────────────────────── */
+  .page {
+    position: absolute;
+    inset: 0;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 20px;
+    opacity: 0;
+    transform: translateX(240px);
+    transition: transform 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                opacity 0.2s ease;
+    overflow-y: auto;   /* allow per-page scroll */
+  }
+  .page.active {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  /* ── HOME page (Barcode) ───────────────────────────────────── */
+  #page-home {
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .menu-btn {
+    width: 200px;
+    height: 50px;
+    background: #18e3;
+    border: none;
+    border-radius: 8px;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    font-size: 15px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s, transform 0.1s;
+    outline: none;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .menu-btn.focused {
+    background: #04a1;
+    box-shadow: 0 0 12px rgba(4, 161, 225, 0.6);
+  }
+
+  .menu-btn.pressed {
+    background: #04a1;
+    transform: scale(0.97);
+  }
+
+  /* ── SCAN page ─────────────────────────────────────────────── */
+  #page-scan { gap: 0; }
+
+  #scan-mode-label {
+    font-size: 11px;
+    color: #07e0;
+    margin-top: 6px;
+  }
+
+  #scan-status {
+    font-size: 13px;
+    color: #fff;
+    margin-top: 8px;
+    text-align: center;
+  }
+
+  #scan-barcode {
+    font-size: 12px;
+    color: #07e0;
+    margin-top: 6px;
+    text-align: center;
+    word-break: break-all;
+    min-height: 16px;
+  }
+
+  #scan-info {
+    font-size: 10px;
+    color: #8410;
+    margin-top: 4px;
+    text-align: center;
+  }
+
+  /* Simulated camera viewfinder */
+  #viewfinder {
+    flex: 1;
+    margin-top: 8px;
+    border: 1px solid #1a3a1a;
+    border-radius: 4px;
+    background:
+      repeating-linear-gradient(0deg, #0a1a0a 0px, #0a1a0a 3px, #071207 3px, #071207 6px),
+      #050f05;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #viewfinder-crosshair {
+    width: 100px;
+    height: 100px;
+    border: 2px solid rgba(0, 200, 0, 0.4);
+    border-radius: 4px;
+    position: relative;
+  }
+
+  #viewfinder-crosshair::before,
+  #viewfinder-crosshair::after {
+    content: '';
+    position: absolute;
+    background: rgba(0, 200, 0, 0.3);
+  }
+  #viewfinder-crosshair::before {
+    width: 1px; height: 100%;
+    left: 50%; top: 0;
+  }
+  #viewfinder-crosshair::after {
+    width: 100%; height: 1px;
+    top: 50%; left: 0;
+  }
+
+  #viewfinder-label {
+    position: absolute;
+    bottom: 4px;
+    font-size: 8px;
+    color: rgba(0,200,0,0.4);
+  }
+
+  /* Scanning animation */
+  @keyframes scan-line {
+    0%   { top: 0; }
+    100% { top: 100%; }
+  }
+
+  #scan-line {
+    display: none;
+    position: absolute;
+    left: 0; right: 0;
+    height: 2px;
+    background: rgba(0, 200, 0, 0.5);
+    animation: scan-line 1.5s linear infinite;
+  }
+  #viewfinder.scanning #scan-line { display: block; }
+
+  #stocktake-label {
+    font-size: 10px;
+    color: #07e0;
+    margin-top: 4px;
+    text-align: center;
+    min-height: 14px;
+  }
+
+  /* Input channel strip (shown only in INPUT mode) */
+  #input-channel-strip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    font-size: 9px;
+    color: #5050f0;
+    min-height: 12px;
+  }
+  #input-channel-strip.hidden { display: none; }
+
+  /* ── RESULT page ────────────────────────────────────────────── */
+  #page-result { gap: 0; }
+  #result-title {
+    font-size: 12px;
+    color: #fff;
+    margin-top: 8px;
+    text-align: center;
+  }
+  #result-barcode {
+    font-size: 10px;
+    color: #07e0;
+    margin-top: 4px;
+    text-align: center;
+    word-break: break-all;
+  }
+  .result-row {
+    display: flex;
+    font-size: 10px;
+    margin-top: 3px;
+    gap: 4px;
+  }
+  .result-row .label { color: #667; min-width: 52px; }
+  .result-row .value { color: #fff; flex: 1; }
+  .result-row.highlight .value { color: #07e0; font-weight: bold; }
+  .result-divider {
+    border: none;
+    border-top: 1px solid #1a2a3a;
+    margin: 6px 0;
+  }
+  #result-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: auto;
+    padding-bottom: 8px;
+  }
+  .result-btn {
+    flex: 1;
+    background: #111;
+    border: 1px solid #333;
+    color: #07e0;
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    padding: 6px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .result-btn:active { background: #04a1; color: #fff; }
+
+  /* ── PHOTO page ─────────────────────────────────────────────── */
+  #page-photo { gap: 0; }
+  #photo-status {
+    font-size: 12px;
+    color: #fff;
+    margin-top: 10px;
+    text-align: center;
+  }
+  #photo-preview {
+    flex: 1;
+    margin-top: 8px;
+    border: 1px solid #1a3a1a;
+    border-radius: 4px;
+    background: #050f05;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+  #photo-preview-label {
+    font-size: 9px;
+    color: rgba(0,200,0,0.3);
+  }
+  #photo-captured-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: none;
+  }
+  #photo-captured-img.visible { display: block; }
+  #photo-result {
+    font-size: 10px;
+    color: #07e0;
+    margin-top: 6px;
+    text-align: center;
+    min-height: 14px;
+    word-break: break-all;
+  }
+  #photo-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .photo-btn {
+    flex: 1;
+    background: #0a1a0a;
+    border: 1px solid #07e0;
+    color: #07e0;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    padding: 8px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .photo-btn:active { background: #04a1; color: #fff; }
+  .photo-btn.secondary {
+    background: #111;
+    border-color: #333;
+    color: #aaa;
+  }
+
+  /* ── SETTINGS page ─────────────────────────────────────────── */
+  #page-settings { gap: 0; }
+  #settings-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    flex: 1;
+    overflow-y: auto;
+  }
+  .settings-item {
+    background: #0c21;
+    border: 1px solid #1a2a3a;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 10px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transition: border-color 0.1s;
+  }
+  .settings-item:active,
+  .settings-item.focused {
+    border-color: #07e0;
+    background: #0d2a1a;
+  }
+  .settings-item .si-label { color: #fff; }
+  .settings-item .si-value { color: #07e0; font-size: 9px; }
+  .settings-item .si-arrow { color: #333; font-size: 8px; }
+  .settings-item .si-divider {
+    border: none;
+    border-top: 1px solid #1a2a3a;
+    margin: 4px 0;
+    padding: 0;
+    background: transparent;
+    cursor: default;
+    pointer-events: none;
+  }
+  .slider-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  #brightness-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 4px;
+    background: #0c21;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  #brightness-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    background: #04a1;
+    border-radius: 50%;
+    cursor: pointer;
+  }
+  #brightness-value {
+    font-size: 9px;
+    color: #07e0;
+    text-align: right;
+  }
+  .settings-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+    color: #fff;
+  }
+  .settings-slider-row .slider-wrap { flex: 1; }
+
+  /* ── INVENTORY LIST page ────────────────────────────────────── */
+  #page-inventory-list { gap: 0; }
+  #inv-list-title {
+    font-size: 12px;
+    color: #fff;
+    margin-top: 8px;
+    text-align: center;
+  }
+  #inv-list-count {
+    font-size: 10px;
+    color: #07e0;
+    margin-top: 4px;
+    text-align: center;
+  }
+  #inv-list-items {
+    flex: 1;
+    margin-top: 6px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: #050a05;
+    border: 1px solid #1a2a1a;
+    border-radius: 4px;
+    padding: 4px;
+  }
+  .inv-list-row {
+    display: grid;
+    grid-template-columns: 24px 1fr 36px;
+    gap: 4px;
+    font-size: 9px;
+    padding: 3px 4px;
+    border-bottom: 1px solid #0a1a0a;
+    align-items: center;
+  }
+  .inv-list-row:last-child { border-bottom: none; }
+  .inv-list-row .num { color: #334; }
+  .inv-list-row .barcode { color: #07e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inv-list-row .qty { color: #c8c800; text-align: right; }
+  #inv-list-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+    padding-bottom: 6px;
+  }
+  .inv-list-btn {
+    flex: 1;
+    background: #111;
+    border: 1px solid #333;
+    color: #aaa;
+    font-family: 'Courier New', monospace;
+    font-size: 9px;
+    padding: 6px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    text-align: center;
+  }
+  .inv-list-btn.primary {
+    background: #0a1a0a;
+    border-color: #07e0;
+    color: #07e0;
+  }
+  .inv-list-btn:active { background: #04a1; color: #fff; }
+
+  /* ── INVENTORY (stocktake session) page ────────────────────── */
+  #page-inventory { gap: 0; }
+  #inv-title {
+    font-size: 12px;
+    color: #fff;
+    margin-top: 12px;
+    text-align: center;
+  }
+  #inv-count {
+    font-size: 11px;
+    color: #07e0;
+    margin-top: 8px;
+    text-align: center;
+  }
+  #inv-status {
+    font-size: 10px;
+    color: #8410;
+    margin-top: 6px;
+    text-align: center;
+  }
+  .info-panel {
+    margin-top: 12px;
+    border: 1px solid #1a2a3a;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 9px;
+    color: #445;
+    line-height: 1.6;
+  }
+  .info-panel strong { color: #667; }
+
+  /* ── ABOUT page ─────────────────────────────────────────── */
+  #page-about { gap: 0; }
+  #about-title {
+    font-size: 13px;
+    color: #fff;
+    margin-top: 24px;
+    text-align: center;
+  }
+  #about-info {
+    font-size: 11px;
+    color: #07e0;
+    margin-top: 12px;
+    text-align: center;
+    line-height: 1.8;
+  }
+  #about-back-hint {
+    font-size: 9px;
+    color: #334;
+    margin-top: auto;
+    padding-bottom: 10px;
+    text-align: center;
+  }
+
+  /* ── LOG page ────────────────────────────────────────────── */
+  #page-log { gap: 0; }
+  #log-title {
+    font-size: 12px;
+    color: #fff;
+    margin-top: 8px;
+    text-align: center;
+  }
+  #log-date-nav {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 6px;
+    font-size: 10px;
+  }
+  #log-date-nav .arrow {
+    background: #111;
+    border: 1px solid #333;
+    color: #07e0;
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    cursor: pointer;
+    user-select: none;
+  }
+  #log-date-nav .arrow:active { background: #04a1; color: #fff; }
+  #log-date-display { color: #07e0; min-width: 80px; text-align: center; }
+  #log-entries {
+    flex: 1;
+    margin-top: 6px;
+    overflow-y: auto;
+    background: #050a05;
+    border: 1px solid #1a2a1a;
+    border-radius: 4px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .log-entry {
+    display: grid;
+    grid-template-columns: 40px 36px 1fr 28px;
+    gap: 4px;
+    font-size: 8px;
+    padding: 2px 4px;
+    border-bottom: 1px solid #0a1a0a;
+    align-items: center;
+  }
+  .log-entry:last-child { border-bottom: none; }
+  .log-entry .time { color: #445; }
+  .log-entry .type { color: #07e0; }
+  .log-entry .content { color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-entry .status-ok { color: #07e0; }
+  .log-entry .status-err { color: #f04040; }
+  #log-empty { font-size: 9px; color: #334; text-align: center; margin-top: 20px; }
+  #log-hint {
+    font-size: 9px;
+    color: #334;
+    text-align: center;
+    margin-top: 4px;
+  }
+
+  /* ── Keypad / Controls ──────────────────────────────────────── */
+  .controls {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .ctrl-btn {
+    background: #111;
+    border: 1px solid #333;
+    color: #aaa;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 7px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+    min-width: 56px;
+    text-align: center;
+  }
+
+  .ctrl-btn:hover { background: #1a1a2e; color: #fff; }
+
+  .ctrl-btn.active {
+    background: #04a1;
+    color: #fff;
+    border-color: #04a1;
+    box-shadow: 0 0 10px rgba(4,161,225,0.4);
+  }
+
+  .ctrl-btn.long-press {
+    background: #f800;
+    color: #fff;
+    border-color: #f800;
+    box-shadow: 0 0 10px rgba(248,0,0,0.4);
+  }
+
+  .ctrl-hint {
+    font-size: 9px;
+    color: #333;
+    text-align: center;
+    margin-top: 2px;
+  }
+
+  .divider { width: 1px; height: 20px; background: #222; }
+
+  /* ── Toast / Notification overlay ───────────────────────────── */
+  #toast {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.85);
+    color: #07e0;
+    font-size: 9px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid #07e0;
+    z-index: 20;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    white-space: nowrap;
+  }
+  #toast.show { opacity: 1; }
+
+  /* ── Scan mode badge ───────────────────────────────────────── */
+  .mode-badge {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    margin-right: 3px;
+  }
+  .mode-query    { background: #0a2a0a; color: #07e0; border: 1px solid #07e0; }
+  .mode-input   { background: #0a0a2a; color: #5050f0; border: 1px solid #5050f0; }
+  .mode-in      { background: #1a1a00; color: #c8c800; border: 1px solid #c8c800; }
+  .mode-out     { background: #1a0000; color: #f04040; border: 1px solid #f04040; }
+  .mode-count   { background: #0a1a0a; color: #00c800; border: 1px solid #00c800; }
+
+  /* ── MQTT Web UI Input Field (input target for INPUT mode) ── */
+  #mqtt-web-input {
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 200px;
+    background: #0a1a0a;
+    border: 1px solid #07e0;
+    border-radius: 4px;
+    color: #07e0;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 6px 8px;
+    outline: none;
+    z-index: 15;
+    display: none;
+  }
+  #mqtt-web-input.visible { display: block; }
+  #mqtt-web-input::placeholder { color: #334; }
+
+  /* ═══════════════════════════════════════════════════════════════
+     WT02 Screen (128×64 OLED SSD1306)
+     ═══════════════════════════════════════════════════════════════ */
+
+  /* ── WT02 Screen container ─────────────────────────────────── */
+  #wt02-screen {
+    width: 128px;
+    height: 64px;
+    background: #000;
+    border: 2px solid #1a1a2e;
+    border-radius: 3px;
+    position: absolute;
+    top: 0; left: 0;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px #0d0d1a,
+      0 4px 16px rgba(0,0,0,0.8),
+      inset 0 0 30px rgba(0,0,0,0.4);
+    image-rendering: pixelated;
+  }
+
+  /* WT02 status bar — white/light for OLED contrast */
+  #wt02-status-bar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 10px;
+    background: #fff;
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    z-index: 2;
+  }
+
+  #wt02-status-title {
+    font-size: 7px;
+    color: #000;
+    font-weight: bold;
+    flex: 1;
+    letter-spacing: 0.5px;
+  }
+
+  #wt02-page-container {
+    position: absolute;
+    top: 10px; left: 0; right: 0; bottom: 0;
+    overflow: hidden;
+  }
+
+  /* WT02 page base — small font, compact layout */
+  .wt02-page {
+    position: absolute;
+    inset: 0;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    padding: 3px 5px;
+    opacity: 0;
+    transform: translateX(128px);
+    transition: transform 0.15s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                opacity 0.15s ease;
+  }
+  .wt02-page.active {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  /* WT02 HOME page */
+  #wt02-page-home {
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+
+  .wt02-menu-btn {
+    width: 112px;
+    height: 13px;
+    background: #111;
+    border: 1px solid #333;
+    border-radius: 2px;
+    color: #fff;
+    font-family: 'Courier New', monospace;
+    font-size: 7px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.1s;
+    outline: none;
+  }
+  .wt02-menu-btn.focused {
+    background: #04a1;
+    border-color: #04a1;
+    box-shadow: 0 0 6px rgba(4, 161, 225, 0.5);
+  }
+  .wt02-menu-btn.pressed {
+    background: #04a1;
+    transform: scale(0.97);
+  }
+
+  /* WT02 shared items */
+  .wt-item {
+    font-size: 7px;
+    color: #fff;
+    line-height: 1;
+    height: 7px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  #status-list,
+  #trekking-list,
+  #radio-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+
+  #status-funcbar,
+  #trekking-funcbar,
+  #radio-funcbar {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 8px;
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    background: #000;
+    border-top: 1px solid #222;
+    box-sizing: border-box;
+  }
+  #status-funcbar span,
+  #trekking-funcbar span,
+  #radio-funcbar span { font-size: 6px; color: #fff; }
+
+  .wt-detail-overlay {
+    position: absolute; inset: 0;
+    background: #000;
+    display: flex; align-items: center; justify-content: center;
+    z-index: 5;
+  }
+  .wt-detail-overlay.hidden { display: none; }
+  #status-detail-content {
+    font-size: 7px; color: #fff; text-align: center;
+    line-height: 1.6; padding: 6px;
+  }
+
+  .wt-entry-overlay {
+    position: absolute; inset: 0;
+    background: #000;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 3px; z-index: 5;
+  }
+  .wt-entry-overlay.hidden { display: none; }
+  .wt-entry-title { font-size: 8px; color: #fff; font-weight: bold; }
+  .wt-entry-hint  { font-size: 6px;  color: #888; }
+
+  /* WT02-specific status page layout */
+  #wt02-page-status {
+    gap: 0;
+    position: relative;
+  }
+
+  /* WT02-specific trekking page layout */
+  #wt02-page-trekking {
+    gap: 0;
+    position: relative;
+  }
+
+  /* WT02-specific radio page layout */
+  #wt02-page-radio {
+    gap: 0;
+    position: relative;
+  }
+
+  /* ── Controls hint for WT02 ────────────────────────────────── */
+  #wt02-controls-hint {
+    font-size: 9px;
+    color: #333;
+    text-align: center;
+    margin-top: 2px;
+  }
+
+  /* ── Nav hint bar at bottom of screen ────────────────────── */
+  .nav-hint {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 14px;
+    background: #0a0a12;
+    border-top: 1px solid #1a1a2e;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 8px;
+    font-size: 7px;
+    color: #334;
+    z-index: 3;
+  }
+  .nav-hint.hidden { display: none; }
+</style>
+</head>
+<body>
+
+<!-- Device selector -->
+<select id="device-selector">
+  <option value="barcode">ESP32-S3 Barcode Scanner</option>
+  <option value="wt02">WT02 Handheld</option>
+</select>
+
+<div class="device">
+  <div class="device-label" id="device-frame-label">ESP32-S3 · ILI9341 · 240×320</div>
+
+  <!-- Screen wrapper -->
+  <div id="screen-wrapper">
+
+    <!-- ══ Barcode Scanner Screen (240×320) ══ -->
+    <div id="barcode-screen" class="screen">
+      <!-- Status Bar -->
+      <div id="barcode-status-bar">
+        <span id="barcode-status-title">ESP32-Barcode</span>
+        <span id="wifi-icon" class="status-icon" title="WiFi">[W]</span>
+        <span id="mqtt-icon" class="status-icon" title="MQTT">[M]</span>
+        <span id="ble-icon" class="status-icon" title="BLE HID">[B]</span>
+        <span id="sync-icon" class="status-icon" title="Sync"></span>
+        <span id="clock-label">--:--</span>
+      </div>
+
+      <!-- Page Container -->
+      <div id="barcode-page-container">
+
+        <!-- HOME -->
+        <div class="page active" id="page-home" data-page="home">
+          <button class="menu-btn focused" id="btn-home-scan">  掃描  </button>
+          <button class="menu-btn" id="btn-home-inventory">  盤點  </button>
+          <button class="menu-btn" id="btn-home-settings">  設定  </button>
+          <button class="menu-btn" id="btn-home-about">  關於  </button>
+        </div>
+
+        <!-- SCAN -->
+        <div class="page" id="page-scan" data-page="scan">
+          <div id="scan-mode-label">
+            <span class="mode-badge mode-query" id="mode-badge">查詢</span>
+          </div>
+          <div id="scan-status">等待掃描...</div>
+          <div id="scan-barcode"></div>
+          <div id="scan-info">短按=掃描　長按=換模式</div>
+          <div id="viewfinder">
+            <div id="viewfinder-crosshair"></div>
+            <div id="scan-line"></div>
+            <div id="viewfinder-label">● 攝影機預覽</div>
+          </div>
+          <div id="stocktake-label"></div>
+          <div id="input-channel-strip" class="hidden">
+            <span id="input-channel-label">通道:</span>
+            <span id="input-channel-value">--</span>
+          </div>
+        </div>
+
+        <!-- RESULT (query result detail) -->
+        <div class="page" id="page-result" data-page="result">
+          <div id="result-title">查詢結果</div>
+          <div id="result-barcode"></div>
+          <hr class="result-divider">
+          <div id="result-fields">
+            <div class="result-row highlight">
+              <span class="label">品名</span>
+              <span class="value" id="rf-name">--</span>
+            </div>
+            <div class="result-row">
+              <span class="label">規格</span>
+              <span class="value" id="rf-spec">--</span>
+            </div>
+            <div class="result-row">
+              <span class="label">數量</span>
+              <span class="value" id="rf-qty">--</span>
+            </div>
+            <div class="result-row highlight">
+              <span class="label">儲位</span>
+              <span class="value" id="rf-location">--</span>
+            </div>
+            <div class="result-row">
+              <span class="label">供應商</span>
+              <span class="value" id="rf-supplier">--</span>
+            </div>
+            <div class="result-row">
+              <span class="label">入庫日</span>
+              <span class="value" id="rf-date">--</span>
+            </div>
+          </div>
+          <hr class="result-divider">
+          <div id="result-actions">
+            <button class="result-btn" id="btn-result-rescan">重新掃描</button>
+            <button class="result-btn" id="btn-result-home">回主頁</button>
+          </div>
+        </div>
+
+        <!-- PHOTO -->
+        <div class="page" id="page-photo" data-page="photo">
+          <div id="photo-status">預覽中</div>
+          <div id="photo-preview">
+            <div id="photo-preview-label">● 攝影機預覽</div>
+            <canvas id="photo-captured-img" width="240" height="180"></canvas>
+          </div>
+          <div id="photo-result"></div>
+          <div id="photo-actions">
+            <button class="photo-btn secondary" id="btn-photo-back">返回</button>
+            <button class="photo-btn" id="btn-photo-capture">拍照</button>
+            <button class="photo-btn secondary" id="btn-photo-upload" style="display:none">上傳</button>
+          </div>
+        </div>
+
+        <!-- SETTINGS -->
+        <div class="page" id="page-settings" data-page="settings">
+          <div id="settings-list">
+            <!-- WiFi -->
+            <div class="settings-item" id="si-wifi" data-type="wifi">
+              <span class="si-label">WiFi</span>
+              <span class="si-value" id="si-wifi-value">未連線</span>
+              <span class="si-arrow">▶</span>
+            </div>
+            <!-- MQTT -->
+            <div class="settings-item" id="si-mqtt" data-type="mqtt">
+              <span class="si-label">MQTT</span>
+              <span class="si-value" id="si-mqtt-value">未連線</span>
+              <span class="si-arrow">▶</span>
+            </div>
+            <!-- BLE -->
+            <div class="settings-item" id="si-ble" data-type="ble">
+              <span class="si-label">藍牙 HID</span>
+              <span class="si-value" id="si-ble-value">未配對</span>
+              <span class="si-arrow">▶</span>
+            </div>
+            <!-- Divider -->
+            <hr class="si-divider">
+            <!-- Brightness -->
+            <div class="settings-item" id="si-brightness" data-type="slider">
+              <span class="si-label">亮度</span>
+              <div class="slider-wrap" style="flex:1">
+                <input type="range" id="brightness-slider" min="10" max="255" value="200">
+                <div id="brightness-value">200 / 255</div>
+              </div>
+            </div>
+            <!-- Volume -->
+            <div class="settings-item" id="si-volume" data-type="slider">
+              <span class="si-label">音量</span>
+              <div class="slider-wrap" style="flex:1">
+                <input type="range" id="volume-slider" min="0" max="100" value="60">
+                <div id="volume-value">60%</div>
+              </div>
+            </div>
+            <!-- Divider -->
+            <hr class="si-divider">
+            <!-- Language -->
+            <div class="settings-item" id="si-lang" data-type="lang">
+              <span class="si-label">語言</span>
+              <span class="si-value" id="si-lang-value">繁體中文</span>
+              <span class="si-arrow">◀▶</span>
+            </div>
+            <!-- Divider -->
+            <hr class="si-divider">
+            <!-- Work Log -->
+            <div class="settings-item" id="si-log" data-type="log">
+              <span class="si-label">工作日誌</span>
+              <span class="si-value" id="si-log-value">今日 0 筆</span>
+              <span class="si-arrow">▶</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- INVENTORY (stocktake session) -->
+        <div class="page" id="page-inventory" data-page="inventory">
+          <div id="inv-title">盤點作業</div>
+          <div id="inv-count">0 筆已掃描</div>
+          <div id="inv-status">請至掃描頁選擇盤點模式</div>
+          <div id="inv-session-info" style="font-size:10px;color:#07e0;margin-top:8px;text-align:center;display:none"></div>
+          <div class="info-panel">
+            <strong>操作說明</strong><br>
+            短按 → 重新整理計數<br>
+            長按 → 結束本次盤點
+          </div>
+          <div id="inv-list-link" class="info-panel" style="margin-top:8px;cursor:pointer;text-align:center;color:#07e0;border-color:#07e0">
+            查看盤點清單 ▶
+          </div>
+        </div>
+
+        <!-- INVENTORY LIST (stocktake detail list) -->
+        <div class="page" id="page-inventory-list" data-page="inventory-list">
+          <div id="inv-list-title">盤點清單</div>
+          <div id="inv-list-count">共 0 筆</div>
+          <div id="inv-list-items">
+            <div id="log-empty" style="margin-top:20px;color:#334;font-size:9px;text-align:center">尚無資料</div>
+          </div>
+          <div id="inv-list-actions">
+            <button class="inv-list-btn" id="btn-invlist-back">返回</button>
+            <button class="inv-list-btn primary" id="btn-invlist-upload">上傳全部</button>
+          </div>
+        </div>
+
+        <!-- LOG (work log) -->
+        <div class="page" id="page-log" data-page="log">
+          <div id="log-title">工作日誌</div>
+          <div id="log-date-nav">
+            <span class="arrow" id="log-prev-day">◀</span>
+            <span id="log-date-display">--</span>
+            <span class="arrow" id="log-next-day">▶</span>
+          </div>
+          <div id="log-entries">
+            <div id="log-empty">尚無紀錄</div>
+          </div>
+          <div id="log-hint">◀ ▶ 切換日期</div>
+        </div>
+
+        <!-- ABOUT -->
+        <div class="page" id="page-about" data-page="about">
+          <div id="about-title">韌體資訊</div>
+          <div id="about-info">
+            ESP32-S3 條碼掃描器<br>
+            v1.2.0<br><br>
+            HW: ESP32-S3<br>
+            Display: ILI9341<br>
+            Scanner: HM-803H
+          </div>
+          <div id="about-back-hint">長按返回主頁</div>
+        </div>
+
+      </div><!-- /barcode-page-container -->
+
+      <div id="toast"></div>
+      <!-- MQTT Web UI input target (visible in MQTT INPUT sub-mode) -->
+      <input type="text" id="mqtt-web-input" placeholder="條碼將顯示在這裡..." readonly>
+      <!-- Nav hints -->
+      <div class="nav-hint" id="scan-nav-hint">
+        <span id="nav-hint-left"></span>
+        <span id="nav-hint-right"></span>
+      </div>
+    </div><!-- /barcode-screen -->
+
+
+    <!-- ══ WT02 Screen (128×64) ══ -->
+    <div id="wt02-screen" class="screen hidden">
+      <!-- Status Bar -->
+      <div id="wt02-status-bar">
+        <span id="wt02-status-title">WT02</span>
+      </div>
+
+      <!-- Page Container -->
+      <div id="wt02-page-container">
+
+        <!-- HOME -->
+        <div class="wt02-page" id="wt02-page-home" data-page="home">
+          <button class="wt02-menu-btn focused" id="btn-wt02-home-status">[ Status ]</button>
+          <button class="wt02-menu-btn" id="btn-wt02-home-trekking">[ Trekking ]</button>
+          <button class="wt02-menu-btn" id="btn-wt02-home-radio">[ Radio ]</button>
+        </div>
+
+        <!-- STATUS PAGE (WT02) -->
+        <div class="wt02-page" id="wt02-page-status" data-page="status">
+          <div id="status-list">
+            <div class="wt-item" id="status-item-0">  TEMP: --</div>
+            <div class="wt-item" id="status-item-1">  ALT: --</div>
+            <div class="wt-item" id="status-item-2">  PRES: --</div>
+            <div class="wt-item" id="status-item-3">  STEP: --</div>
+            <div class="wt-item" id="status-item-4">  COMP: --</div>
+          </div>
+          <div id="status-funcbar">
+            <span id="status-func-label">           [BACK]</span>
+          </div>
+          <div id="status-detail" class="wt-detail-overlay hidden">
+            <div id="status-detail-content"></div>
+          </div>
+        </div>
+
+        <!-- TREKKING PAGE (WT02) -->
+        <div class="wt02-page" id="wt02-page-trekking" data-page="trekking">
+          <div id="trekking-list">
+            <div class="wt-item" id="trek-item-0">  Temp: --</div>
+            <div class="wt-item" id="trek-item-1">  Alt: --</div>
+            <div class="wt-item" id="trek-item-2">  Pres: --</div>
+            <div class="wt-item" id="trek-item-3">  Asc: --</div>
+            <div class="wt-item" id="trek-item-4">  Dist: --</div>
+            <div class="wt-item" id="trek-item-5">  Time: --:--:--</div>
+            <div class="wt-item" id="trek-item-6">  Stat: --</div>
+          </div>
+          <div id="trekking-funcbar">
+            <span id="trekking-func-label">  [START]   [BACK]</span>
+          </div>
+          <div id="trekking-entry" class="wt-entry-overlay">
+            <div class="wt-entry-title">TREKKING MODE</div>
+            <div class="wt-entry-hint">[OK] to start</div>
+          </div>
+        </div>
+
+        <!-- RADIO PAGE (WT02) -->
+        <div class="wt02-page" id="wt02-page-radio" data-page="radio">
+          <div id="radio-list">
+            <div class="wt-item" id="radio-item-0">  CH: --</div>
+            <div class="wt-item" id="radio-item-1">  CTCSS: --</div>
+            <div class="wt-item" id="radio-item-2">  Power: --</div>
+            <div class="wt-item" id="radio-item-3">  RSSI: --</div>
+            <div class="wt-item" id="radio-item-4">  VOL: --</div>
+            <div class="wt-item" id="radio-item-5">  SQ: --</div>
+          </div>
+          <div id="radio-funcbar">
+            <span id="radio-func-label">  [PLAY]   [BACK]</span>
+          </div>
+        </div>
+
+      </div><!-- /wt02-page-container -->
+    </div><!-- /wt02-screen -->
+
+  </div><!-- /screen-wrapper -->
+
+  <!-- Keypad controls -->
+  <div class="controls" id="barcode-controls">
+    <div class="btn-row">
+      <button class="ctrl-btn" id="btn-boot">A / BOOT</button>
+    </div>
+    <div class="btn-row" style="margin-top:2px">
+      <span class="ctrl-hint">A: 短按=導航 | 長按1s=確認 | 長按2s=首頁</span>
+    </div>
+    <div class="btn-row" style="margin-top:4px">
+      <button class="ctrl-btn" id="btn-sim-scan" style="background:#0a1a0a;color:#07e0;border-color:#07e0">模擬掃描</button>
+      <button class="ctrl-btn" id="btn-sim-wifi" style="background:#1a0a0a;color:#f800;border-color:#f800">WiFi</button>
+      <button class="ctrl-btn" id="btn-sim-mqtt" style="background:#1a0a0a;color:#f800;border-color:#f800">MQTT</button>
+    </div>
+  </div>
+
+  <!-- WT02 controls hint (hidden by default) -->
+  <div id="wt02-controls-hint" class="hidden" style="font-size:9px;color:#333;text-align:center;margin-top:2px">
+    A = Short: navigate | Hold >1s = confirm | Hold >2s = home
+  </div>
+
+</div><!-- /device -->
+
+<script>
+// v=5 — full GUI completion
+'use strict';
+
+// ── Constants ────────────────────────────────────────────────
+const SCAN_MODES = ['查詢', '輸入', '進貨', '出貨', '盤點'];
+const INPUT_CHANNELS = ['⌨️ BLE HID', '🌐 MQTT'];
+const LONG_MS    = 1000;
+const HOME_MS    = 2000;
+
+// ── Clock ───────────────────────────────────────────────────
+function updateClock() {
+  const el = document.getElementById('clock-label');
+  if (!el) return;
+  const now = new Date();
+  el.textContent = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+// ── Toast ────────────────────────────────────────────────────
+let _toastTimer = null;
+function showToast(msg, duration) {
+  const toast = document.getElementById('toast');
+  if (!toast) return;
+  toast.textContent = msg;
+  toast.classList.add('show');
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => toast.classList.remove('show'), duration || 2000);
+}
+
+// ── Offline queue (simulated SD card) ───────────────────────
+const _offlineQueue = [];
+function queueOffline(action, barcode, detail) {
+  _offlineQueue.push({ time: new Date().toISOString(), action, barcode, detail });
+  _updateSyncIndicator();
+}
+function _updateSyncIndicator() {
+  const el = document.getElementById('sync-icon');
+  if (!el) return;
+  const n = _offlineQueue.length;
+  el.textContent = n > 0 ? `↑${n}` : '';
+  el.style.color = n > 0 ? '#c8c800' : '#000';
+}
+function flushOfflineQueue() {
+  const count = _offlineQueue.length;
+  _offlineQueue.length = 0;
+  _updateSyncIndicator();
+  return count;
+}
+
+// ── Work log (simulated SD card) ─────────────────────────────
+const _logStore = {};  // key = YYYY-MM-DD
+function addLogEntry(action, barcode, status) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (!_logStore[today]) _logStore[today] = [];
+  const time = new Date().toISOString().slice(11, 19);
+  _logStore[today].push({ time, action, barcode, status });
+  _updateLogCounter();
+}
+function getLogEntries(dateStr) {
+  return _logStore[dateStr] || [];
+}
+function _updateLogCounter() {
+  const today = new Date().toISOString().slice(0, 10);
+  const count = (_logStore[today] || []).length;
+  const el = document.getElementById('si-log-value');
+  if (el) el.textContent = `今日 ${count} 筆`;
+}
+addLogEntry('系統', '啟動', 'OK');
+
+// ── Base Page class ──────────────────────────────────────────
+class Page {
+  constructor(name) {
+    this.name = name;
+    this.el = document.getElementById(`page-${name}`) ||
+              document.getElementById(`wt02-page-${name}`);
+  }
+  onActivate(app)  {}
+  onDeactivate()   {}
+  handleNav(app, ev) {}
+}
+
+// ── Barcode HOME Page ─────────────────────────────────────────
+class BarcodeHomePage extends Page {
+  constructor() {
+    super('home');
+    this.focusIdx = 0;
+    this.btns = [
+      document.getElementById('btn-home-scan'),
+      document.getElementById('btn-home-inventory'),
+      document.getElementById('btn-home-settings'),
+      document.getElementById('btn-home-about'),
+    ];
+    // A/Boot 鍵：短按(<2s)移動焦點，長按(>2s)確認
+    this._bootPressTime = 0;
+    this._bootTimer = null;
+    this._bootLongPressMs = 2000;
+  }
+
+  onActivate(app) {
+    this.focusIdx = 0;
+    this._updateFocus();
+  }
+
+  _updateFocus() {
+    this.btns.forEach((b, i) => b.classList.toggle('focused', i === this.focusIdx));
+  }
+
+  _animateBtn(idx) {
+    const btn = this.btns[idx];
+    if (!btn) return;
+    btn.classList.add('pressed');
+    setTimeout(() => btn.classList.remove('pressed'), 150);
+  }
+
+  // ── 短按：移動焦點到下一項 ───────────────────────────────────
+  _shortPress(app) {
+    this.focusIdx = (this.focusIdx + 1) % this.btns.length;
+    this._updateFocus();
+    this._animateBtn(this.focusIdx);
+  }
+
+  // ── 長按：確認進入 ──────────────────────────────────────────
+  _longPress(app) {
+    const destinations = ['scan', 'inventory', 'settings', 'about'];
+    this._animateBtn(this.focusIdx);
+    setTimeout(() => app.navigate(destinations[this.focusIdx] || 'home'), 120);
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'NEXT' || ev === 'BOOT_DOWN') {
+      // 短按或NEXT：移動焦點到下一項
+      this.focusIdx = (this.focusIdx + 1) % this.btns.length;
+      this._updateFocus();
+      this._animateBtn(this.focusIdx);
+    } else if (ev === 'CONFIRM' || ev === 'BOOT_UP') {
+      // 長按釋放或CONFIRM：確認進入
+      const destinations = ['scan', 'inventory', 'settings', 'about'];
+      this._animateBtn(this.focusIdx);
+      setTimeout(() => app.navigate(destinations[this.focusIdx] || 'home'), 120);
+    }
+  }
+
+  handleHomeSelect(idx) {
+    this.focusIdx = idx;
+    this._updateFocus();
+  }
+}
+
+// ── WT02 HOME Page ────────────────────────────────────────────
+class WT02HomePage extends Page {
+  constructor() {
+    super();
+    this.name = 'home';
+    this.el = document.getElementById('wt02-page-home');
+    this.focusIdx = 0;
+    this.btns = [
+      document.getElementById('btn-wt02-home-status'),
+      document.getElementById('btn-wt02-home-trekking'),
+      document.getElementById('btn-wt02-home-radio'),
+    ];
+  }
+
+  onActivate(app) {
+    this.focusIdx = 0;
+    this._updateFocus();
+  }
+
+  _updateFocus() {
+    this.btns.forEach((b, i) => b.classList.toggle('focused', i === this.focusIdx));
+  }
+
+  _animateBtn(idx) {
+    const btn = this.btns[idx];
+    if (!btn) return;
+    btn.classList.add('pressed');
+    setTimeout(() => btn.classList.remove('pressed'), 150);
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      this.focusIdx = 0;
+      this._updateFocus();
+      return;
+    }
+    if (ev === 'NEXT') {
+      this.focusIdx = (this.focusIdx + 1) % this.btns.length;
+      this._updateFocus();
+      this._animateBtn(this.focusIdx);
+    } else if (ev === 'CONFIRM') {
+      this._animateBtn(this.focusIdx);
+      const destinations = ['status', 'trekking', 'radio'];
+      setTimeout(() => app.navigate(destinations[this.focusIdx] || 'home'), 120);
+    }
+  }
+
+  handleHomeSelect(idx) {
+    this.focusIdx = idx;
+    this._updateFocus();
+  }
+}
+
+// ── SCAN Page ───────────────────────────────────────────────
+class ScanPage extends Page {
+  constructor() {
+    super('scan');
+    this.scanModeIdx  = 0;
+    this.inputChannel = 0;  // 0=BLE HID, 1=MQTT Web UI
+    this.queryResultShown = false;
+    this.stocktakeActive  = false;
+    this.stocktakeEntries  = {};
+    this.stocktakeSessionId = 0;
+    this.stocktakeCount    = 0;
+    this._lastBarcode = '';
+  }
+
+  onActivate(app) {
+    this._resetScanUI();
+    this.queryResultShown = false;
+    const vf = document.getElementById('viewfinder');
+    if (vf) vf.classList.remove('scanning');
+    this._updateNavHint();
+    this._updateInputChannelUI();
+  }
+
+  _resetScanUI() {
+    const scanStatus = document.getElementById('scan-status');
+    const scanBarcode = document.getElementById('scan-barcode');
+    const scanInfo = document.getElementById('scan-info');
+    const stocktakeLabel = document.getElementById('stocktake-label');
+    const channelStrip = document.getElementById('input-channel-strip');
+    if (scanStatus) scanStatus.textContent = '等待掃描...';
+    if (scanBarcode) scanBarcode.textContent = '';
+    if (scanInfo) scanInfo.textContent = '短按=掃描　長按=換模式';
+    if (stocktakeLabel) stocktakeLabel.textContent = '';
+    if (channelStrip) channelStrip.classList.add('hidden');
+    this._setMode(0);
+  }
+
+  _setMode(idx) {
+    this.scanModeIdx = idx;
+    const mode = SCAN_MODES[idx];
+    const badge = document.getElementById('mode-badge');
+    if (badge) {
+      badge.textContent = mode;
+      const cssClass = ['query','input','in','out','count'][idx] || 'query';
+      badge.className = `mode-badge mode-${cssClass}`;
+    }
+    const scanStatus = document.getElementById('scan-status');
+    const descs = {
+      '查詢': '等待掃描...',
+      '輸入': '選擇輸入通道...',
+      '進貨': '等待掃描進貨...',
+      '出貨': '等待掃描出貨...',
+      '盤點': '等待掃描盤點...'
+    };
+    if (scanStatus) scanStatus.textContent = descs[mode] || '等待掃描...';
+
+    // Show/hide input channel strip
+    const channelStrip = document.getElementById('input-channel-strip');
+    if (channelStrip) {
+      channelStrip.classList.toggle('hidden', idx !== 1);
+    }
+
+    // Show/hide mqtt web input
+    const mqttInput = document.getElementById('mqtt-web-input');
+    if (mqttInput) {
+      mqttInput.classList.toggle('visible', idx === 1 && this.inputChannel === 1);
+    }
+
+    this._updateNavHint();
+  }
+
+  _updateNavHint() {
+    const hintLeft = document.getElementById('nav-hint-left');
+    const hintRight = document.getElementById('nav-hint-right');
+    const scanNavHint = document.getElementById('scan-nav-hint');
+    if (!scanNavHint) return;
+    if (this.scanModeIdx === 1) {
+      scanNavHint.classList.remove('hidden');
+      if (hintLeft) hintLeft.textContent = '←返回';
+      if (hintRight) hintRight.textContent = '◀▶切換通道';
+    } else {
+      scanNavHint.classList.remove('hidden');
+      if (hintLeft) hintLeft.textContent = '←返回';
+      if (hintRight) hintRight.textContent = '長按=確認';
+    }
+  }
+
+  _updateInputChannelUI() {
+    const channelValue = document.getElementById('input-channel-value');
+    if (channelValue) channelValue.textContent = INPUT_CHANNELS[this.inputChannel];
+    const mqttInput = document.getElementById('mqtt-web-input');
+    if (mqttInput) mqttInput.classList.toggle('visible', this.scanModeIdx === 1 && this.inputChannel === 1);
+  }
+
+  _triggerScan(app) {
+    const viewfinder = document.getElementById('viewfinder');
+    if (viewfinder) viewfinder.classList.add('scanning');
+    setTimeout(() => {
+      if (viewfinder) viewfinder.classList.remove('scanning');
+      const barcode = 'CODE128-' + Math.floor(100000 + Math.random() * 900000);
+      this._lastBarcode = barcode;
+      const scanBarcode = document.getElementById('scan-barcode');
+      if (scanBarcode) scanBarcode.textContent = barcode;
+
+      if (this.scanModeIdx === 0) {
+        // QUERY
+        const scanStatus = document.getElementById('scan-status');
+        const scanInfo = document.getElementById('scan-info');
+        if (scanStatus) scanStatus.textContent = '查詢中...';
+        if (scanInfo) scanInfo.textContent = app.mqttConnected ? '正在查詢倉庫...' : 'MQTT 離線';
+        if (!app.mqttConnected) {
+          if (scanStatus) scanStatus.textContent = 'MQTT 錯誤';
+        } else {
+          setTimeout(() => {
+            // Mock result
+            const resultData = {
+              name: '電阻 10kΩ',
+              spec: '0805 1/8W',
+              qty: '500',
+              location: 'A-01-03',
+              supplier: '大毅科技',
+              date: '2026-07-20',
+            };
+            app.showResult(barcode, resultData);
+          }, 800);
+        }
+      } else if (this.scanModeIdx === 1) {
+        // INPUT — BLE HID or MQTT
+        if (this.inputChannel === 0) {
+          // BLE HID: type into hidden input then dispatch
+          const hiddenInput = document.createElement('input');
+          hiddenInput.type = 'text';
+          hiddenInput.style.cssText = 'position:fixed;opacity:0;top:0;left:0;width:1px;height:1px;z-index:-1';
+          document.body.appendChild(hiddenInput);
+          hiddenInput.focus();
+          let charIdx = 0;
+          const typeNext = () => {
+            if (charIdx < barcode.length) {
+              hiddenInput.value += barcode[charIdx];
+              hiddenInput.dispatchEvent(new Event('input', { bubbles: true }));
+              charIdx++;
+              setTimeout(typeNext, 8);
+            } else {
+              hiddenInput.value += '\n';
+              hiddenInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+              hiddenInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+              setTimeout(() => {
+                document.body.removeChild(hiddenInput);
+                const scanInfo = document.getElementById('scan-info');
+                if (scanInfo) scanInfo.textContent = '已送出: ' + barcode;
+                const scanStatus = document.getElementById('scan-status');
+                if (scanStatus) scanStatus.textContent = '已透過藍牙送出 ✓';
+                addLogEntry('輸入', barcode, 'OK');
+                showToast('已透過藍牙送出: ' + barcode);
+              }, 50);
+            }
+          };
+          typeNext();
+        } else {
+          // MQTT Web UI
+          const mqttInput = document.getElementById('mqtt-web-input');
+          if (mqttInput) {
+            mqttInput.value = barcode;
+            mqttInput.classList.add('visible');
+            const scanStatus = document.getElementById('scan-status');
+            if (scanStatus) scanStatus.textContent = '已推送至 Web UI ✓';
+            const scanInfo = document.getElementById('scan-info');
+            if (scanInfo) scanInfo.textContent = '已推送: ' + barcode;
+            addLogEntry('MQTT推送', barcode, 'OK');
+            showToast('已推送至 Web UI: ' + barcode);
+          }
+        }
+      } else if (this.scanModeIdx === 2) {
+        // STOCK IN
+        const scanStatus = document.getElementById('scan-status');
+        const scanInfo = document.getElementById('scan-info');
+        if (scanStatus) scanStatus.textContent = '進貨 +1';
+        if (scanInfo) scanInfo.textContent = barcode + ' → +1';
+        showToast('進貨: ' + barcode + ' +1');
+        addLogEntry('進貨', barcode, 'OK');
+        if (!app.mqttConnected) queueOffline('進貨', barcode, '+1');
+      } else if (this.scanModeIdx === 3) {
+        // STOCK OUT
+        const scanStatus = document.getElementById('scan-status');
+        const scanInfo = document.getElementById('scan-info');
+        if (scanStatus) scanStatus.textContent = '出貨 -1';
+        if (scanInfo) scanInfo.textContent = barcode + ' → -1';
+        showToast('出貨: ' + barcode + ' -1');
+        addLogEntry('出貨', barcode, 'OK');
+        if (!app.mqttConnected) queueOffline('出貨', barcode, '-1');
+      } else if (this.scanModeIdx === 4) {
+        // STOCKTAKE
+        if (!this.stocktakeActive) {
+          const lbl = document.getElementById('stocktake-label');
+          if (lbl) lbl.textContent = '無進行中工作階段';
+          return;
+        }
+        if (!this.stocktakeEntries[barcode]) this.stocktakeEntries[barcode] = 0;
+        this.stocktakeEntries[barcode]++;
+        this.stocktakeCount = Object.keys(this.stocktakeEntries).length;
+        const lbl = document.getElementById('stocktake-label');
+        const cnt = document.getElementById('inv-count');
+        if (lbl) lbl.textContent = `盤點 ${barcode.split('-')[1]} = ${this.stocktakeEntries[barcode]}`;
+        if (cnt) cnt.textContent = `${this.stocktakeCount} 筆已掃描`;
+        showToast(`盤點: ${barcode.split('-')[1]} → ${this.stocktakeEntries[barcode]}`);
+        addLogEntry('盤點', barcode, 'OK');
+      }
+    }, 700);
+  }
+
+  _startStocktake() {
+    this.stocktakeSessionId = Math.floor(1000 + Math.random() * 9000);
+    this.stocktakeActive = true;
+    this.stocktakeEntries = {};
+    this.stocktakeCount = 0;
+    const invCount = document.getElementById('inv-count');
+    const invStatus = document.getElementById('inv-status');
+    const invSessionInfo = document.getElementById('inv-session-info');
+    if (invCount) invCount.textContent = '0 筆已掃描';
+    if (invStatus) invStatus.textContent = `工作階段 #${this.stocktakeSessionId}`;
+    if (invSessionInfo) {
+      invSessionInfo.style.display = 'block';
+      invSessionInfo.textContent = `Session #${this.stocktakeSessionId}`;
+    }
+    setTimeout(() => {
+      const lbl = document.getElementById('stocktake-label');
+      if (lbl) lbl.textContent = `工作階段 #${this.stocktakeSessionId} 已開始`;
+      showToast(`盤點工作階段 #${this.stocktakeSessionId} 已開始`);
+    }, 400);
+    addLogEntry('盤點', `開始工作階段 #${this.stocktakeSessionId}`, 'OK');
+  }
+
+  _cycleMode() {
+    this.scanModeIdx = (this.scanModeIdx + 1) % SCAN_MODES.length;
+    this._setMode(this.scanModeIdx);
+    const lbl = document.getElementById('stocktake-label');
+    if (SCAN_MODES[this.scanModeIdx] === '盤點') {
+      if (lbl) lbl.textContent = '正在啟動工作階段...';
+      this._startStocktake();
+    } else {
+      if (lbl) lbl.textContent = '';
+      this.stocktakeActive = false;
+    }
+    showToast('模式: ' + SCAN_MODES[this.scanModeIdx]);
+  }
+
+  _cycleInputChannel() {
+    this.inputChannel = (this.inputChannel + 1) % INPUT_CHANNELS.length;
+    this._updateInputChannelUI();
+    showToast('通道: ' + INPUT_CHANNELS[this.inputChannel]);
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    } else if (ev === 'NEXT') {
+      if (this.scanModeIdx === 0 && this.queryResultShown) {
+        this.queryResultShown = false;
+        app.navigate('home');
+      } else {
+        this._triggerScan(app);
+      }
+    } else if (ev === 'RIGHT') {
+      // In INPUT mode, RIGHT cycles input channel
+      if (this.scanModeIdx === 1) {
+        this._cycleInputChannel();
+      }
+    } else if (ev === 'CONFIRM') {
+      this._cycleMode();
+    }
+  }
+
+  doSimulateScan(app) {
+    if (app.currentPage !== 'scan') app.navigate('scan');
+    this._triggerScan(app);
+  }
+
+  getStocktakeEntries() {
+    return Object.entries(this.stocktakeEntries).map(([barcode, qty], i) => ({
+      num: i + 1,
+      barcode,
+      qty
+    }));
+  }
+}
+
+// ── RESULT Page ───────────────────────────────────────────────
+class ResultPage extends Page {
+  constructor() {
+    super('result');
+  }
+
+  onActivate(app) {
+    // Populated by app.showResult()
+    const hint = document.getElementById('nav-hint-left');
+    if (hint) hint.textContent = '';
+    const hintRight = document.getElementById('nav-hint-right');
+    if (hintRight) hintRight.textContent = '';
+    const scanNavHint = document.getElementById('scan-nav-hint');
+    if (scanNavHint) scanNavHint.classList.remove('hidden');
+    const hintL = document.getElementById('nav-hint-left');
+    const hintR = document.getElementById('nav-hint-right');
+    if (hintL) hintL.textContent = '←返回';
+    if (hintR) hintR.textContent = '重新掃描';
+  }
+
+  onDeactivate() {
+    const scanNavHint = document.getElementById('scan-nav-hint');
+    if (scanNavHint) scanNavHint.classList.add('hidden');
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT' || ev === 'RIGHT') {
+      app.navigate('scan');
+    }
+  }
+
+  populate(barcode, data) {
+    const bc = document.getElementById('result-barcode');
+    if (bc) bc.textContent = barcode;
+    const fields = ['name','spec','qty','location','supplier','date'];
+    fields.forEach(f => {
+      const el = document.getElementById(`rf-${f}`);
+      if (el) el.textContent = data[f] || '--';
+    });
+  }
+}
+
+// ── PHOTO Page ───────────────────────────────────────────────
+class PhotoPage extends Page {
+  constructor() {
+    super('photo');
+    this.captured = false;
+    this.uploaded = false;
+  }
+
+  onActivate(app) {
+    this.captured = false;
+    this.uploaded = false;
+    const status = document.getElementById('photo-status');
+    const preview = document.getElementById('photo-preview-label');
+    const result = document.getElementById('photo-result');
+    const img = document.getElementById('photo-captured-img');
+    const uploadBtn = document.getElementById('btn-photo-upload');
+    const captureBtn = document.getElementById('btn-photo-capture');
+    if (status) status.textContent = '預覽中';
+    if (preview) { preview.style.display = 'flex'; preview.textContent = '● 攝影機預覽'; }
+    if (result) result.textContent = '';
+    if (img) img.classList.remove('visible');
+    if (uploadBtn) uploadBtn.style.display = 'none';
+    if (captureBtn) captureBtn.textContent = '拍照';
+  }
+
+  _capture() {
+    this.captured = true;
+    const preview = document.getElementById('photo-preview-label');
+    const img = document.getElementById('photo-captured-img');
+    const status = document.getElementById('photo-status');
+    const captureBtn = document.getElementById('btn-photo-capture');
+    const uploadBtn = document.getElementById('btn-photo-upload');
+    if (status) status.textContent = '拍攝完成';
+    if (preview) preview.style.display = 'none';
+    if (img) {
+      // Simulate captured image with a colored rect on canvas
+      const canvas = img;
+      canvas.width = 240; canvas.height = 180;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0a1a0a';
+      ctx.fillRect(0, 0, 240, 180);
+      ctx.fillStyle = '#07e0';
+      ctx.font = '10px Courier New';
+      ctx.fillText('CODE128-123456', 20, 90);
+      ctx.fillText('Captured: ' + new Date().toLocaleTimeString(), 20, 110);
+      img.classList.add('visible');
+    }
+    if (captureBtn) captureBtn.textContent = '重拍';
+    if (uploadBtn) uploadBtn.style.display = 'inline-block';
+    addLogEntry('拍照', '已拍攝', 'OK');
+    showToast('拍照完成');
+  }
+
+  _upload() {
+    if (this.uploaded) return;
+    const status = document.getElementById('photo-status');
+    const result = document.getElementById('photo-result');
+    if (status) status.textContent = '上傳中...';
+    if (result) result.textContent = '';
+    setTimeout(() => {
+      this.uploaded = true;
+      if (status) status.textContent = '上傳完成 ✓';
+      if (result) result.textContent = '已送出，請至 Web UI 確認';
+      addLogEntry('拍照上傳', '已上傳', 'OK');
+      showToast('已上傳至伺服器');
+    }, 1500);
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    }
+  }
+}
+
+// ── SETTINGS Page ────────────────────────────────────────────
+class SettingsPage extends Page {
+  constructor() {
+    super('settings');
+    this._bindSliders();
+    this._bindItems();
+    this.focusIdx = 0;
+    this.items = []; // populated after DOM is ready
+  }
+
+  onActivate(app) {
+    // 每次進入設定頁，滾動回頂端，重置焦點
+    const list = document.getElementById('settings-list');
+    if (list) list.scrollTop = 0;
+    // 延後抓 items，確保 DOM 已渲染
+    setTimeout(() => {
+      this.items = Array.from(document.querySelectorAll('.settings-item:not(.si-divider)'));
+      this.focusIdx = 0;
+      this._updateFocus();
+    }, 50);
+  }
+
+  _updateFocus() {
+    this.items.forEach((el, i) => {
+      el.classList.toggle('focused', i === this.focusIdx);
+      // 自動滾動使焦點項目可見
+      if (i === this.focusIdx) {
+        const list = document.getElementById('settings-list');
+        if (list && el) {
+          const elTop = el.offsetTop;
+          const elBottom = elTop + el.offsetHeight;
+          const listTop = list.scrollTop;
+          const listBottom = listTop + list.clientHeight;
+          if (elBottom > listBottom) list.scrollTop = elBottom - list.clientHeight;
+          else if (elTop < listTop) list.scrollTop = elTop;
+        }
+      }
+    });
+  }
+
+  _bindSliders() {
+    const bs = document.getElementById('brightness-slider');
+    const bv = document.getElementById('brightness-value');
+    if (bs && bv) {
+      bs.addEventListener('input', () => { bv.textContent = `${bs.value} / 255`; });
+    }
+    const vs = document.getElementById('volume-slider');
+    const vv = document.getElementById('volume-value');
+    if (vs && vv) {
+      vs.addEventListener('input', () => { vv.textContent = `${vs.value}%`; });
+    }
+  }
+
+  _bindItems() {
+    const siLog = document.getElementById('si-log');
+    if (siLog) {
+      siLog.addEventListener('click', () => {
+        window.__app && window.__app.navigate('log');
+      });
+    }
+    const siLang = document.getElementById('si-lang');
+    if (siLang) {
+      siLang.addEventListener('click', () => {
+        const el = document.getElementById('si-lang-value');
+        if (el) {
+          el.textContent = el.textContent === '繁體中文' ? 'English' : '繁體中文';
+          showToast('語言切換: ' + el.textContent);
+        }
+      });
+    }
+  }
+
+  handleNav(app, ev) {
+    console.log('[SettingsPage] NAV:', ev, 'items.len:', this.items.length, 'focus:', this.focusIdx);
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    } else if (ev === 'CONFIRM') {
+      // 長按確認：套用設定並閃爍提示
+      showToast('設定已套用');
+      const focused = this.items[this.focusIdx];
+      if (focused) {
+        focused.style.borderColor = '#fff';
+        setTimeout(() => { focused.style.borderColor = ''; }, 300);
+      }
+    } else if (ev === 'NEXT') {
+      // 短按：移動焦點到下一項
+      if (this.items.length > 0) {
+        this.focusIdx = (this.focusIdx + 1) % this.items.length;
+        this._updateFocus();
+      } else {
+        const list = document.getElementById('settings-list');
+        if (list) list.scrollTop += 40;
+      }
+    }
+  }
+}
+
+// ── INVENTORY Page (stocktake session management) ───────────
+class InventoryPage extends Page {
+  constructor() {
+    super('inventory');
+  }
+
+  onActivate(app) {
+    const sp = app.pages.scan;
+    const cnt = document.getElementById('inv-count');
+    const status = document.getElementById('inv-status');
+    if (sp && cnt) cnt.textContent = `${sp.stocktakeCount} 筆已掃描`;
+    if (sp && sp.stocktakeActive && status) {
+      status.textContent = `工作階段 #${sp.stocktakeSessionId}`;
+    } else if (status) {
+      status.textContent = '請至掃描頁選擇盤點模式';
+    }
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    } else if (ev === 'CONFIRM') {
+      this._endStocktake(app);
+    } else if (ev === 'NEXT') {
+      // Refresh count
+      const sp = app.pages.scan;
+      const cnt = document.getElementById('inv-count');
+      if (sp && cnt) cnt.textContent = `${sp.stocktakeCount} 筆已掃描`;
+      showToast('已重新整理');
+    }
+  }
+
+  _endStocktake(app) {
+    const sp = app.pages.scan;
+    if (!sp || !sp.stocktakeActive) {
+      showToast('無進行中的工作階段');
+      return;
+    }
+    const sessionId = sp.stocktakeSessionId;
+    sp.stocktakeActive = false;
+    const status = document.getElementById('inv-status');
+    if (status) status.textContent = `工作階段 #${sessionId} 已結束`;
+    showToast(`工作階段 #${sessionId} 已結束`);
+    addLogEntry('盤點', `結束工作階段 #${sessionId} (${sp.stocktakeCount}筆)`, 'OK');
+    // Flush to offline queue if MQTT offline
+    if (!app.mqttConnected) {
+      const entries = sp.getStocktakeEntries();
+      entries.forEach(e => queueOffline('盤點', e.barcode, `qty=${e.qty}`));
+      showToast(`已暫存 ${entries.length} 筆至 SD 卡`);
+    }
+  }
+}
+
+// ── INVENTORY LIST Page ─────────────────────────────────────
+class InventoryListPage extends Page {
+  constructor() {
+    super('inventory-list');
+  }
+
+  onActivate(app) {
+    this._render(app);
+  }
+
+  _render(app) {
+    const entries = app.pages.scan.getStocktakeEntries();
+    const container = document.getElementById('inv-list-items');
+    const countEl = document.getElementById('inv-list-count');
+    if (!container) return;
+    if (countEl) countEl.textContent = `共 ${entries.length} 筆`;
+    container.innerHTML = '';
+    if (entries.length === 0) {
+      container.innerHTML = '<div id="log-empty" style="color:#334;font-size:9px;text-align:center;margin-top:20px">尚無資料</div>';
+      return;
+    }
+    entries.forEach(e => {
+      const row = document.createElement('div');
+      row.className = 'inv-list-row';
+      row.innerHTML = `<span class="num">${e.num}</span><span class="barcode">${e.barcode}</span><span class="qty">x${e.qty}</span>`;
+      container.appendChild(row);
+    });
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT' || ev === 'CONFIRM') {
+      app.navigate('inventory');
+    }
+  }
+}
+
+// ── LOG Page ─────────────────────────────────────────────────
+class LogPage extends Page {
+  constructor() {
+    super('log');
+    this.currentDate = new Date().toISOString().slice(0, 10);
+  }
+
+  onActivate(app) {
+    this._render();
+  }
+
+  _render() {
+    const display = document.getElementById('log-date-display');
+    if (display) display.textContent = this.currentDate;
+    const container = document.getElementById('log-entries');
+    if (!container) return;
+    container.innerHTML = '';
+    const entries = getLogEntries(this.currentDate);
+    if (entries.length === 0) {
+      container.innerHTML = '<div id="log-empty" style="color:#334;font-size:9px;text-align:center;margin-top:20px">尚無紀錄</div>';
+      return;
+    }
+    entries.forEach(e => {
+      const row = document.createElement('div');
+      row.className = 'log-entry';
+      const statusClass = e.status === 'OK' ? 'status-ok' : 'status-err';
+      row.innerHTML = `<span class="time">${e.time}</span><span class="type">${e.action}</span><span class="content">${e.barcode}</span><span class="${statusClass}">${e.status}</span>`;
+      container.appendChild(row);
+    });
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('settings');
+    } else if (ev === 'NEXT') {
+      // Advance to next day
+      const d = new Date(this.currentDate);
+      d.setDate(d.getDate() + 1);
+      this.currentDate = d.toISOString().slice(0, 10);
+      this._render();
+    } else if (ev === 'PREV') {
+      // Previous day
+      const d = new Date(this.currentDate);
+      d.setDate(d.getDate() - 1);
+      this.currentDate = d.toISOString().slice(0, 10);
+      this._render();
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WT02 — StatusPage
+// ═══════════════════════════════════════════════════════════════
+class StatusPage extends Page {
+  constructor() {
+    super('status');
+    this.labels = ['TEMP', 'ALT', 'PRES', 'STEP', 'COMP'];
+    this.values  = [25.5, 120.0, 1013.2, 5678, 'NW'];
+    this.units   = ['C',   'm',   'hPa',  '',    ''];
+    this.selectedIdx = 0;
+    this.inDetail    = false;
+    this.timer       = null;
+  }
+
+  onActivate(app) {
+    this.selectedIdx = 0;
+    this.inDetail    = false;
+    this._showDetail(false);
+    this._startMockTimer();
+    this._render();
+  }
+
+  onDeactivate() {
+    this._stopMockTimer();
+  }
+
+  _startMockTimer() {
+    this._stopMockTimer();
+    this.timer = setInterval(() => {
+      if (!this.inDetail) return;
+      this.values[0] = +(this.values[0] + (Math.random() - 0.5) * 0.2).toFixed(1);
+      this.values[1] = +(this.values[1] + (Math.random() - 0.5) * 0.5).toFixed(1);
+      this.values[2] = +(this.values[2] + (Math.random() - 0.5) * 0.1).toFixed(1);
+      this.values[3] = this.values[3] + Math.floor(Math.random() * 3);
+      this._render();
+    }, 800);
+  }
+
+  _stopMockTimer() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+
+  _render() {
+    for (let i = 0; i < 5; i++) {
+      const el = document.getElementById(`status-item-${i}`);
+      if (!el) continue;
+      const prefix = (i === this.selectedIdx && !this.inDetail) ? '> ' : '  ';
+      const unit   = this.units[i];
+      const val   = typeof this.values[i] === 'number'
+        ? (Number.isInteger(this.values[i]) ? this.values[i] : this.values[i].toFixed(1))
+        : this.values[i];
+      el.textContent = `${prefix}${this.labels[i]}: ${val}${unit}`;
+    }
+    const funcLabel = document.getElementById('status-func-label');
+    if (funcLabel) funcLabel.textContent = this.inDetail ? '  [BACK]           ' : '           [BACK]';
+  }
+
+  _showDetail(show) {
+    this.inDetail = show;
+    const overlay = document.getElementById('status-detail');
+    const content = document.getElementById('status-detail-content');
+    if (!overlay || !content) return;
+    if (show) {
+      overlay.classList.remove('hidden');
+      const unit = this.units[this.selectedIdx];
+      const val  = typeof this.values[this.selectedIdx] === 'number'
+        ? (Number.isInteger(this.values[this.selectedIdx]) ? this.values[this.selectedIdx] : this.values[this.selectedIdx].toFixed(1))
+        : this.values[this.selectedIdx];
+      content.innerHTML =
+        `<strong>${this.labels[this.selectedIdx]}</strong><br>` +
+        `Value: ${val}${unit}<br><br>` +
+        `Short press to exit`;
+    } else {
+      overlay.classList.add('hidden');
+    }
+    this._render();
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    } else if (ev === 'NEXT') {
+      if (this.inDetail) { this._showDetail(false); return; }
+      this.selectedIdx = (this.selectedIdx + 1) % 5;
+      this._render();
+    } else if (ev === 'CONFIRM') {
+      if (this.inDetail) {
+        this._showDetail(false);
+      } else {
+        this._showDetail(true);
+      }
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WT02 — TrekkingPage
+// ═══════════════════════════════════════════════════════════════
+class TrekkingPage extends Page {
+  constructor() {
+    super('trekking');
+    this.labels    = ['Temp', 'Alt', 'Pres', 'Asc', 'Dist', 'Time', 'Stat'];
+    this.units     = ['C',   'm',   'hPa',  'm',   'km',   '',     ''];
+    this.temp       = 22.0;
+    this.alt        = 150.0;
+    this.pres       = 1010.0;
+    this.ascent     = 320.0;
+    this.distKm     = 2.45;
+    this.timeMs     = 0;
+    this.isRecording = false;
+    this.startTime  = 0;
+    this.pauseTime  = 0;
+    this.totalPause = 0;
+    this.selectedIdx = 0;
+    this.inEntry    = true;
+    this.timer      = null;
+  }
+
+  onActivate(app) {
+    this.selectedIdx = 0;
+    this.inEntry = true;
+    this._showEntry(true);
+    this._stopTimer();
+    this._render();
+  }
+
+  onDeactivate() { this._stopTimer(); }
+
+  _showEntry(show) {
+    const el = document.getElementById('trekking-entry');
+    if (el) el.classList.toggle('hidden', !show);
+  }
+
+  _startTimer() {
+    this._stopTimer();
+    this.startTime = Date.now() - this.totalPause;
+    this.timer = setInterval(() => {
+      if (!this.isRecording) return;
+      this.timeMs = Date.now() - this.startTime;
+      this.alt    += (Math.random() - 0.5) * 0.3;
+      this.temp   += (Math.random() - 0.5) * 0.1;
+      this.pres   += (Math.random() - 0.5) * 0.05;
+      this.distKm += 0.0002;
+      this.ascent  = Math.max(0, this.ascent + (Math.random() - 0.4) * 0.1);
+      this._render();
+    }, 500);
+  }
+
+  _stopTimer() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+
+  _render() {
+    const fields = [
+      this.temp.toFixed(1),
+      this.alt.toFixed(0),
+      this.pres.toFixed(1),
+      this.ascent.toFixed(0),
+      this.distKm.toFixed(2),
+      this._fmtTime(this.timeMs),
+      this.isRecording ? 'RUNNING' : (this.timeMs > 0 ? 'PAUSED' : 'READY'),
+    ];
+    for (let i = 0; i < 7; i++) {
+      const el = document.getElementById(`trek-item-${i}`);
+      if (!el) continue;
+      const prefix = (i === this.selectedIdx && !this.inEntry) ? '> ' : '  ';
+      el.textContent = `${prefix}${this.labels[i]}: ${fields[i]}${this.units[i] && this.units[i] !== '' ? ' ' + this.units[i] : ''}`;
+    }
+    const funcLabel = document.getElementById('trekking-func-label');
+    if (funcLabel) {
+      const startTxt = this.isRecording ? '[PAUSE]'
+        : (this.timeMs > 0 ? '[RESUME]' : '[START]');
+      funcLabel.textContent = `  ${startTxt}   [BACK]`;
+    }
+  }
+
+  _fmtTime(ms) {
+    const t = Math.floor(ms / 1000);
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    } else if (ev === 'NEXT') {
+      if (this.inEntry) { this.inEntry = false; this._showEntry(false); this._render(); return; }
+      this.selectedIdx = (this.selectedIdx + 1) % 7;
+      this._render();
+    } else if (ev === 'CONFIRM') {
+      if (this.inEntry) {
+        this.inEntry = false;
+        this._showEntry(false);
+        this._startTimer();
+        this.isRecording = true;
+        this._render();
+        return;
+      }
+      if (this.isRecording) {
+        this.isRecording = false;
+        this.pauseTime = Date.now();
+        this._stopTimer();
+      } else {
+        this.isRecording = true;
+        this.totalPause += Date.now() - this.pauseTime;
+        this._startTimer();
+      }
+      this._render();
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WT02 — RadioPage
+// ═══════════════════════════════════════════════════════════════
+class RadioPage extends Page {
+  constructor() {
+    super('radio');
+    this.labels      = ['CH', 'CTCSS', 'Power', 'RSSI', 'VOL', 'SQ'];
+    this.channel     = 1;
+    this.maxChannel  = 20;
+    this.ctcssIdx    = 0;
+    this.highPower   = true;
+    this.rssi        = -73;
+    this.volume      = 4;
+    this.squelch     = 4;
+    this.isPlaying   = false;
+    this.selectedIdx = 0;
+    this.timer       = null;
+    this.ctcssTable  = [67.0,71.9,74.4,77.0,79.7,82.5,85.4,88.5,91.5,94.8,97.4,100.0,103.5,107.2,110.9,114.8,
+                        118.8,123.0,127.3,131.8,136.5,141.3,146.2,151.4,156.7,162.2,167.9,173.8,179.9,186.2,192.8,203.5,
+                        210.7,218.1,225.7,233.6,241.8,250.3];
+    this.freqs       = [145.025,145.125,145.225,145.325,145.425,145.525,145.625,145.725,145.825,145.925,
+                        430.025,430.125,430.225,430.325,430.425,430.525,430.625,430.725,430.825,430.925];
+  }
+
+  onActivate(app) {
+    this.selectedIdx = 0;
+    this._stopTimer();
+    this._render();
+  }
+
+  onDeactivate() { this._stopTimer(); }
+
+  _currentFreq() {
+    return this.freqs[Math.min(this.channel - 1, this.freqs.length - 1)];
+  }
+
+  _render() {
+    const freq = this._currentFreq();
+    const rows = [
+      `CH:${this.channel} ${freq.toFixed(3)}`,
+      `CTCSS: ${this.ctcssIdx === 0 ? 'OFF' : this.ctcssTable[this.ctcssIdx - 1].toFixed(1)}`,
+      `Power: ${this.highPower ? 'HIGH' : 'LOW'}`,
+      `RSSI: ${this.rssi} dBm`,
+      `VOL: ${this.volume}`,
+      `SQ: ${this.squelch}`,
+    ];
+    for (let i = 0; i < 6; i++) {
+      const el = document.getElementById(`radio-item-${i}`);
+      if (!el) continue;
+      const prefix = (i === this.selectedIdx) ? '> ' : '  ';
+      el.textContent = prefix + rows[i];
+    }
+    const funcLabel = document.getElementById('radio-func-label');
+    if (funcLabel) {
+      const playTxt = this.isPlaying ? '[MUTE]' : '[PLAY]';
+      funcLabel.textContent = `  ${playTxt}   [BACK]`;
+    }
+  }
+
+  handleNav(app, ev) {
+    if (ev === 'HOME' || ev === 'LEFT') {
+      app.navigate('home');
+    } else if (ev === 'NEXT') {
+      this.channel = (this.channel % this.maxChannel) + 1;
+      this._render();
+    } else if (ev === 'CONFIRM') {
+      this.isPlaying = !this.isPlaying;
+      if (this.isPlaying) {
+        this._startRssiTimer();
+        showToast(`Playing CH${this.channel} ${this._currentFreq().toFixed(3)} MHz`);
+      } else {
+        this._stopTimer();
+        showToast('Muted');
+      }
+      this._render();
+    }
+  }
+
+  _startRssiTimer() {
+    this._stopTimer();
+    this.timer = setInterval(() => {
+      this.rssi = -75 + Math.floor(Math.random() * 20);
+      this._render();
+    }, 600);
+  }
+
+  _stopTimer() {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  }
+}
+
+// ── App ─────────────────────────────────────────────────────
+let appRef;
+
+class App {
+  constructor() {
+    this.currentDevice = 'barcode';
+    this.currentPage = 'home';
+    this.wifiConnected = false;
+    this.mqttConnected = false;
+    this.bleConnected = false;
+
+    this.pages = {
+      home:           new BarcodeHomePage(),
+      scan:           new ScanPage(),
+      result:         new ResultPage(),
+      photo:          new PhotoPage(),
+      settings:       new SettingsPage(),
+      inventory:      new InventoryPage(),
+      'inventory-list': new InventoryListPage(),
+      log:            new LogPage(),
+      about:          new Page('about'),
+      // WT02
+      status:    new StatusPage(),
+      trekking:  new TrekkingPage(),
+      radio:     new RadioPage(),
+      wt02Home:  new WT02HomePage(),
+    };
+
+    this._pendingResult = null;
+    appRef = this;
+  }
+
+  // ── Show query result ──────────────────────────────────────
+  showResult(barcode, data) {
+    this._pendingResult = { barcode, data };
+    this.navigate('result');
+    const rp = this.pages.result;
+    if (rp && data) {
+      rp.populate(barcode, data);
+    }
+    addLogEntry('查詢', barcode, 'OK');
+  }
+
+  // ── Switch device ───────────────────────────────────────────
+  switchDevice(deviceKey) {
+    clearTimeout(this._btnConfirmTimer);
+    clearTimeout(this._btnHomeTimer);
+    this._btnConfirmTimer = null;
+    this._btnHomeTimer = null;
+
+    const barcodeScreen = document.getElementById('barcode-screen');
+    const wt02Screen = document.getElementById('wt02-screen');
+    const frameLabel = document.getElementById('device-frame-label');
+    const barcodeControls = document.getElementById('barcode-controls');
+    const wt02Hint = document.getElementById('wt02-controls-hint');
+
+    if (deviceKey === 'wt02') {
+      if (barcodeScreen) barcodeScreen.style.display = 'none';
+      if (wt02Screen) wt02Screen.style.display = 'block';
+      if (frameLabel) frameLabel.textContent = 'WT02 · SSD1306 · 128×64';
+      if (barcodeControls) barcodeControls.style.display = 'none';
+      if (wt02Hint) wt02Hint.style.display = 'block';
+      this.currentDevice = 'wt02';
+      this.navigate('home');
+    } else {
+      if (barcodeScreen) barcodeScreen.style.display = 'block';
+      if (wt02Screen) wt02Screen.style.display = 'none';
+      if (frameLabel) frameLabel.textContent = 'ESP32-S3 · ILI9341 · 240×320';
+      if (barcodeControls) barcodeControls.style.display = 'flex';
+      if (wt02Hint) wt02Hint.style.display = 'none';
+      this.currentDevice = 'barcode';
+      this.navigate('home');
+    }
+  }
+
+  // ── Navigation ─────────────────────────────────────────────
+  navigate(pageName) {
+    // Deactivate current
+    const prevPage = this.currentPage;
+    const prev = this._getPageObj(prevPage);
+    if (prev && typeof prev.onDeactivate === 'function') prev.onDeactivate();
+
+    if (pageName === 'home') {
+      if (this.currentDevice === 'wt02') {
+        this.pages.wt02Home.focusIdx = 0;
+        this.pages.wt02Home._updateFocus();
+      } else {
+        this.pages.home.focusIdx = 0;
+        this.pages.home._updateFocus();
+      }
+    }
+
+    this._showPage(pageName, this.currentDevice);
+    this.currentPage = pageName;
+
+    const next = this._getPageObj(pageName);
+    if (next && typeof next.onActivate === 'function') next.onActivate(this);
+  }
+
+  _getPageObj(name) {
+    if (this.currentDevice === 'wt02') {
+      if (name === 'home') return this.pages.wt02Home;
+      return this.pages[name];
+    }
+    return this.pages[name];
+  }
+
+  _showPage(name, device) {
+    if (device === 'wt02') {
+      document.querySelectorAll('.wt02-page').forEach(p => p.classList.remove('active'));
+      const el = document.getElementById(`wt02-page-${name}`);
+      if (el) el.classList.add('active');
+    } else {
+      document.querySelectorAll('#barcode-page-container .page').forEach(p => p.classList.remove('active'));
+      const el = document.getElementById(`page-${name}`);
+      if (el) el.classList.add('active');
+    }
+  }
+
+  // ── BOOT button (A鍵)：短按<2s移NEXT，2-5s確認，>5s回首頁
+  _onBootDown() {
+    this._bootDownTime = Date.now();
+    this._bootHomeTimer = setTimeout(() => {
+      // >5s 直接發 HOME，不等放開
+      this._bootHomeFired = true;
+      this._sendNav('HOME');
+    }, 5000);
+  }
+
+  _onBootUp() {
+    if (this._bootHomeFired) {
+      // 已觸發HOME，忽略這次UP
+      if (this._bootHomeTimer) { clearTimeout(this._bootHomeTimer); this._bootHomeTimer = null; }
+      this._bootHomeFired = false;
+      return;
+    }
+    const elapsed = Date.now() - (this._bootDownTime || 0);
+    if (this._bootHomeTimer) { clearTimeout(this._bootHomeTimer); this._bootHomeTimer = null; }
+    if (elapsed >= 2000) {
+      // 2-5s：確認
+      this._sendNav('CONFIRM');
+    } else {
+      // <2s：移動
+      this._sendNav('NEXT');
+    }
+  }
+
+  _sendNav(ev) {
+    const page = this._getPageObj(this.currentPage);
+    console.log('[BOOT] _sendNav:', ev, 'page:', this.currentPage, 'handleNav:', typeof page?.handleNav);
+    if (page && typeof page.handleNav === 'function') {
+      page.handleNav(this, ev);
+    }
+  }
+
+  // ── Sim helpers ─────────────────────────────────────────────
+  _toggleWifi() {
+    this.wifiConnected = !this.wifiConnected;
+    const icon = document.getElementById('wifi-icon');
+    if (icon) icon.style.color = this.wifiConnected ? '#07e0' : '#000';
+    const siVal = document.getElementById('si-wifi-value');
+    if (siVal) siVal.textContent = this.wifiConnected ? '已連線' : '未連線';
+    showToast(this.wifiConnected ? 'WiFi: 已連線 ✓' : 'WiFi: 已斷線');
+    if (this.wifiConnected && _offlineQueue.length > 0) {
+      const count = flushOfflineQueue();
+      showToast(`已同步 ${count} 筆離線資料`);
+    }
+  }
+
+  _toggleMQTT() {
+    this.mqttConnected = !this.mqttConnected;
+    const icon = document.getElementById('mqtt-icon');
+    if (icon) icon.style.color = this.mqttConnected ? '#07e0' : '#000';
+    const siVal = document.getElementById('si-mqtt-value');
+    if (siVal) siVal.textContent = this.mqttConnected ? '已連線' : '未連線';
+    showToast(this.mqttConnected ? 'MQTT: 已連線 ✓' : 'MQTT: 已斷線');
+  }
+
+  _toggleBLE() {
+    this.bleConnected = !this.bleConnected;
+    const icon = document.getElementById('ble-icon');
+    if (icon) icon.style.color = this.bleConnected ? '#07e0' : '#000';
+    const siVal = document.getElementById('si-ble-value');
+    if (siVal) siVal.textContent = this.bleConnected ? '已配對 (MacBook)' : '未配對';
+    showToast(this.bleConnected ? '藍牙: 已配對 ✓' : '藍牙: 已斷線');
+  }
+
+  // ── Init ─────────────────────────────────────────────────
+  init(deviceKey) {
+    const selector = document.getElementById('device-selector');
+    if (selector) {
+      selector.addEventListener('change', (e) => this.switchDevice(e.target.value));
+    }
+
+    this.switchDevice(deviceKey || 'barcode');
+
+    // Boot button
+    const boot = document.getElementById('btn-boot');
+    if (boot) {
+      boot.addEventListener('mousedown', () => this._onBootDown());
+      boot.addEventListener('mouseup',   () => this._onBootUp());
+      boot.addEventListener('mouseleave',() => this._onBootUp());
+      boot.addEventListener('touchstart',() => this._onBootDown(), { passive: true });
+      boot.addEventListener('touchend',  () => this._onBootUp(),   { passive: true });
+    }
+
+    // Home menu buttons
+    const btns = [
+      { id: 'btn-home-scan', idx: 0, dest: 'scan' },
+      { id: 'btn-home-inventory', idx: 1, dest: 'inventory' },
+      { id: 'btn-home-settings', idx: 2, dest: 'settings' },
+      { id: 'btn-home-about', idx: 3, dest: 'about' },
+    ];
+    btns.forEach(b => {
+      const el = document.getElementById(b.id);
+      if (el) el.addEventListener('click', () => {
+        this.pages.home.handleHomeSelect(b.idx);
+        this.navigate(b.dest);
+      });
+    });
+
+    // WT02 home buttons
+    const wt02Btns = [
+      { id: 'btn-wt02-home-status', idx: 0, dest: 'status' },
+      { id: 'btn-wt02-home-trekking', idx: 1, dest: 'trekking' },
+      { id: 'btn-wt02-home-radio', idx: 2, dest: 'radio' },
+    ];
+    wt02Btns.forEach(b => {
+      const el = document.getElementById(b.id);
+      if (el) el.addEventListener('click', () => {
+        this.pages.wt02Home.handleHomeSelect(b.idx);
+        this.navigate(b.dest);
+      });
+    });
+
+    // Result page buttons
+    const btnRescan = document.getElementById('btn-result-rescan');
+    if (btnRescan) btnRescan.addEventListener('click', () => this.navigate('scan'));
+    const btnResultHome = document.getElementById('btn-result-home');
+    if (btnResultHome) btnResultHome.addEventListener('click', () => this.navigate('home'));
+
+    // Photo page buttons
+    const btnPhotoCapture = document.getElementById('btn-photo-capture');
+    if (btnPhotoCapture) btnPhotoCapture.addEventListener('click', () => {
+      const pp = this.pages.photo;
+      if (pp.captured) {
+        // Reset for retake
+        pp.captured = false;
+        const img = document.getElementById('photo-captured-img');
+        const preview = document.getElementById('photo-preview-label');
+        const status = document.getElementById('photo-status');
+        const uploadBtn = document.getElementById('btn-photo-upload');
+        if (status) status.textContent = '預覽中';
+        if (preview) { preview.style.display = 'flex'; preview.textContent = '● 攝影機預覽'; }
+        if (img) img.classList.remove('visible');
+        if (uploadBtn) uploadBtn.style.display = 'none';
+        btnPhotoCapture.textContent = '拍照';
+      } else {
+        pp._capture();
+      }
+    });
+    const btnPhotoUpload = document.getElementById('btn-photo-upload');
+    if (btnPhotoUpload) btnPhotoUpload.addEventListener('click', () => {
+      this.pages.photo._upload();
+    });
+    const btnPhotoBack = document.getElementById('btn-photo-back');
+    if (btnPhotoBack) btnPhotoBack.addEventListener('click', () => this.navigate('home'));
+
+    // Inventory list page buttons
+    const btnInvBack = document.getElementById('btn-invlist-back');
+    if (btnInvBack) btnInvBack.addEventListener('click', () => this.navigate('inventory'));
+    const btnInvUpload = document.getElementById('btn-invlist-upload');
+    if (btnInvUpload) btnInvUpload.addEventListener('click', () => {
+      const entries = this.pages.scan.getStocktakeEntries();
+      if (entries.length === 0) {
+        showToast('無資料可上傳');
+        return;
+      }
+      if (!this.mqttConnected) {
+        entries.forEach(e => queueOffline('盤點上傳', e.barcode, `qty=${e.qty}`));
+        showToast(`已暫存 ${entries.length} 筆至 SD 卡`);
+      } else {
+        showToast(`已上傳 ${entries.length} 筆至伺服器`);
+        addLogEntry('盤點上傳', `共 ${entries.length} 筆`, 'OK');
+      }
+    });
+
+    // Inventory page — view list link
+    const invListLink = document.getElementById('inv-list-link');
+    if (invListLink) invListLink.addEventListener('click', () => this.navigate('inventory-list'));
+
+    // Log page — date navigation
+    const logPrev = document.getElementById('log-prev-day');
+    if (logPrev) logPrev.addEventListener('click', () => {
+      const lp = this.pages.log;
+      lp.handleNav(this, 'PREV');
+    });
+    const logNext = document.getElementById('log-next-day');
+    if (logNext) logNext.addEventListener('click', () => {
+      const lp = this.pages.log;
+      lp.handleNav(this, 'NEXT');
+    });
+
+    // Sim buttons
+    const btnSimScan = document.getElementById('btn-sim-scan');
+    if (btnSimScan) btnSimScan.addEventListener('click', () => {
+      const sp = this.pages.scan;
+      if (sp) sp.doSimulateScan(this);
+    });
+    const btnSimWifi = document.getElementById('btn-sim-wifi');
+    if (btnSimWifi) btnSimWifi.addEventListener('click', () => this._toggleWifi());
+    const btnSimMqtt = document.getElementById('btn-sim-mqtt');
+    if (btnSimMqtt) btnSimMqtt.addEventListener('click', () => this._toggleMQTT());
+
+    // Keyboard shortcuts
+    // Debug: show key press indicator
+    const _bootDebug = document.getElementById('boot-debug') || (() => {
+      const d = document.createElement('div');
+      d.id = 'boot-debug';
+      d.style = 'position:fixed;bottom:8px;left:8px;background:#0f0;font-size:10px;color:#000;padding:2px 6px;border-radius:3px;z-index:9999;display:none';
+      d.textContent = 'BOOT';
+      document.body.appendChild(d);
+      return d;
+    })();
+
+    document.addEventListener('keydown', (e) => {
+      if (e.repeat) return;
+      _bootDebug.textContent = 'BOOT↓ ' + e.key;
+      _bootDebug.style.display = 'block';
+      if (e.key === 'Enter' || e.key === ' ') {
+        this._onBootDown();
+      } else if (e.key === 'Escape' || e.key === 'h' || e.key === 'H') {
+        this._sendNav('HOME');
+      } else if (e.key === 's' || e.key === 'S') {
+        const sp = this.pages.scan;
+        if (sp) sp.doSimulateScan(this);
+      } else if (e.key === '1') {
+        this._toggleWifi();
+      } else if (e.key === '2') {
+        this._toggleMQTT();
+      } else if (e.key === '3') {
+        this._toggleBLE();
+      } else if (e.key === 'm' || e.key === 'M') {
+        const sp = this.pages.scan;
+        if (sp) sp._cycleMode();
+      } else if (e.key === 'ArrowLeft') {
+        this._sendNav('LEFT');
+      } else if (e.key === 'ArrowRight') {
+        this._sendNav('RIGHT');
+      }
+    });
+
+    document.addEventListener('keyup', (e) => {
+      _bootDebug.textContent = 'BOOT↑ ' + e.key;
+      if (e.key === 'Enter' || e.key === ' ') {
+        this._onBootUp();
+      }
+    });
+  }
+}
+
+// ── Public wrappers ────────────────────────────────────────────
+App.prototype.bootDown = function() { this._onBootDown(); };
+App.prototype.bootUp   = function() { this._onBootUp(); };
+App.prototype.sendNav  = function(ev) { this._sendNav(ev); };
+App.prototype.cycleScanMode = function() {
+  const sp = this.pages.scan;
+  if (sp) sp._cycleMode();
+};
+App.prototype.triggerScan = function() {
+  const sp = this.pages.scan;
+  if (sp) sp._triggerScan(this);
+};
+
+// ── Bootstrap ────────────────────────────────────────────────
+const app = new App();
+window.__app = app;
+app.init('barcode');
+</script>
+</body>
+</html>

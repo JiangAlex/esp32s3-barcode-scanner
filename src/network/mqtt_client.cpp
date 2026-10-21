@@ -77,10 +77,10 @@ bool mqtt_is_connected(void) {
     return mqtt.connected();
 }
 
-void mqtt_query_barcode(const char* barcode) {
+bool mqtt_query_barcode(const char* barcode) {
     if (!mqtt.connected()) {
         Serial.println("[MQTT] Not connected, cannot query");
-        return;
+        return false;
     }
 
     JsonDocument doc;
@@ -90,8 +90,9 @@ void mqtt_query_barcode(const char* barcode) {
     char buffer[256];
     serializeJson(doc, buffer, sizeof(buffer));
 
-    mqtt.publish(MQTT_TOPIC_QUERY, buffer);
-    Serial.printf("[MQTT] Query sent: %s\n", barcode);
+    bool ok = mqtt.publish(MQTT_TOPIC_QUERY, buffer);
+    Serial.printf("[MQTT] Query sent: %s (ok=%d)\n", barcode, (int)ok);
+    return ok;
 }
 
 void mqtt_create_item(const char* barcode, const char* name, const char* spec,
@@ -121,10 +122,87 @@ void mqtt_set_response_callback(mqtt_response_cb_t cb) {
     response_callback = cb;
 }
 
+// ─── Stock in/out (P2) ────────────────────────────────────────────────────
+
+static void publish_stock(const char* topic, const char* barcode, int quantity) {
+    if (!mqtt.connected()) {
+        Serial.println("[MQTT] Not connected, cannot publish stock");
+        return;
+    }
+    if (quantity < 1) quantity = 1;
+
+    JsonDocument doc;
+    doc["device_id"] = DEVICE_ID;
+    doc["barcode"]   = barcode;
+    doc["quantity"]  = quantity;
+
+    char buffer[256];
+    serializeJson(doc, buffer, sizeof(buffer));
+    mqtt.publish(topic, buffer);
+    Serial.printf("[MQTT] %s: %s x%d\n", topic, barcode, quantity);
+}
+
+void mqtt_stock_in(const char* barcode, int quantity) {
+    publish_stock(MQTT_TOPIC_STOCK_IN, barcode, quantity);
+}
+
+void mqtt_stock_out(const char* barcode, int quantity) {
+    publish_stock(MQTT_TOPIC_STOCK_OUT, barcode, quantity);
+}
+
+// ─── Stocktake session state machine (P3) ──────────────────────────────────
+
+void mqtt_stocktake_start(void) {
+    if (!mqtt.connected()) {
+        Serial.println("[MQTT] Not connected, cannot start stocktake");
+        return;
+    }
+    JsonDocument doc;
+    doc["device_id"] = DEVICE_ID;
+
+    char buffer[128];
+    serializeJson(doc, buffer, sizeof(buffer));
+    mqtt.publish(MQTT_TOPIC_STOCKTAKE_START, buffer);
+    Serial.println("[MQTT] stocktake/start sent");
+}
+
+void mqtt_stocktake_scan(int session_id, const char* barcode, int actual_qty) {
+    if (!mqtt.connected()) {
+        Serial.println("[MQTT] Not connected, cannot send stocktake scan");
+        return;
+    }
+    JsonDocument doc;
+    doc["device_id"]  = DEVICE_ID;
+    doc["session_id"] = session_id;
+    doc["barcode"]    = barcode;
+    doc["actual_qty"] = actual_qty;
+
+    char buffer[256];
+    serializeJson(doc, buffer, sizeof(buffer));
+    mqtt.publish(MQTT_TOPIC_STOCKTAKE_SCAN, buffer);
+    Serial.printf("[MQTT] stocktake/scan: session=%d %s qty=%d\n",
+                  session_id, barcode, actual_qty);
+}
+
+void mqtt_stocktake_end(int session_id) {
+    if (!mqtt.connected()) {
+        Serial.println("[MQTT] Not connected, cannot end stocktake");
+        return;
+    }
+    JsonDocument doc;
+    doc["device_id"]  = DEVICE_ID;
+    doc["session_id"] = session_id;
+
+    char buffer[128];
+    serializeJson(doc, buffer, sizeof(buffer));
+    mqtt.publish(MQTT_TOPIC_STOCKTAKE_END, buffer);
+    Serial.printf("[MQTT] stocktake/end: session=%d\n", session_id);
+}
+
 void mqtt_reconnect(void) {
     if (!wifi_is_connected()) return;
 
-    Serial.printf("[MQTT] Connecting to %s:%d...\n", MQTT_BROKER, MQTT_PORT);
+    Serial.printf("[MQTT] Connecting to %s:%u...\n", s_broker, s_port);
 
     String client_id = String("esp32-scanner-") + String(random(0xffff), HEX);
 
@@ -140,34 +218,18 @@ void mqtt_reconnect(void) {
 }
 
 uint16_t mqtt_publish_inventory_batch(void) {
-    if (!mqtt.connected()) {
-        Serial.println("[MQTT] Not connected, cannot publish batch");
-        return 0;
-    }
-
+    // DEPRECATED (Redmine #79): this used to wrap pending scan-log lines into a
+    // {device_id,count,items} envelope and publish them to warehouse/create.
+    // That payload violates the server's _handle_create contract (which expects
+    // a single {barcode,name,...} item) and was rejected as "Invalid payload".
+    // Stocktake now uses the asynchronous session state machine
+    // (mqtt_stocktake_start/scan/end). This batch path is retained only so the
+    // offline sync caller keeps compiling; it performs no publish. A correct
+    // offline-replay implementation is tracked separately.
     uint32_t pending = scan_log_pending_count();
-    if (pending == 0) {
-        Serial.println("[MQTT][INV] no pending items to upload");
-        return 0;
+    if (pending > 0) {
+        Serial.printf("[MQTT][INV] batch publish disabled (deprecated); "
+                      "%u pending item(s) left untouched\n", pending);
     }
-
-    // Read pending entries as JSON array
-    String payload = scan_log_read_pending();
-    Serial.printf("[MQTT][INV] publishing %u items...\n", pending);
-
-    // Wrap in a batch envelope
-    JsonDocument doc;
-    doc["device_id"] = DEVICE_ID;
-    doc["count"] = pending;
-    doc["items"] = payload;
-
-    char buffer[2048];
-    serializeJson(doc, buffer, sizeof(buffer));
-
-    mqtt.publish(MQTT_TOPIC_CREATE, buffer);
-    Serial.printf("[MQTT][INV] Batch published (%u items)\n", pending);
-
-    // Clear pending after successful publish (best-effort)
-    // The server will ack; if we lose it, items remain in pending for next sync
-    return pending;
+    return 0;
 }

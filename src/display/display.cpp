@@ -5,6 +5,7 @@
 
 #include "display.h"
 #include <LovyanGFX.hpp>
+#include <esp_timer.h>
 #include "config/pinout.h"
 #include "config/config.h"
 #include "input/touch.h"
@@ -124,6 +125,15 @@ static void lvgl_touch_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     }
 }
 
+// ─── LVGL tick source (esp_timer every 2 ms) ────────────────────────────────
+// lv_conf.h sets LV_TICK_CUSTOM 0, so LVGL needs an external tick. This is the
+// single tick source for the whole firmware (previously duplicated in main.cpp).
+
+static void lvgl_tick_cb(void* arg) {
+    (void)arg;
+    lv_tick_inc(2);  // 2 ms period
+}
+
 // ─── Public functions ───────────────────────────────────────────────────────
 
 void display_init(void) {
@@ -159,7 +169,12 @@ void display_init(void) {
     disp_drv.draw_buf = &draw_buf;
     disp = lv_disp_drv_register(&disp_drv);
 
-    // Initialize CST816D touch and register pointer input device
+    // Initialize CST816D touch and register pointer input device.
+    // NOTE: touch_init() always returns true (fault-tolerant); on this board
+    // the CST816 chip is electrically dead (see docs/memory.md 2026-10-04), so
+    // lvgl_touch_cb simply reports RELEASED every cycle — harmless. The indev
+    // is registered here as the single source of truth so touch works as soon
+    // as the hardware is repaired/replaced, with no further code changes.
     if (touch_init(TFT_WIDTH, TFT_HEIGHT, DISP_ROTATION)) {
         lv_indev_drv_init(&indev_drv);
         indev_drv.type = LV_INDEV_TYPE_POINTER;
@@ -167,6 +182,15 @@ void display_init(void) {
         indev_drv.read_cb = lvgl_touch_cb;
         lv_indev_drv_register(&indev_drv);
     }
+
+    // Start the LVGL tick (esp_timer, 2 ms). Required because LV_TICK_CUSTOM=0.
+    const esp_timer_create_args_t tick_args = {
+        .callback = &lvgl_tick_cb,
+        .name = "lvgl_tick",
+    };
+    esp_timer_handle_t tick_timer = nullptr;
+    esp_timer_create(&tick_args, &tick_timer);
+    esp_timer_start_periodic(tick_timer, 2000);  // 2000 us = 2 ms
 }
 
 void display_set_spi_mutex(SemaphoreHandle_t mutex) {

@@ -11,6 +11,7 @@
 #define BOARD_NAME          "ESP32-S3 Barcode Scanner"
 #define FW_VERSION          "0.1.0"
 #define DEVICE_ID           "esp32-001"
+#define BLE_DEVICE_NAME     "SoftSnail"   // BLE HID keyboard advertised name
 
 // ─── NVS Settings Persistence ──────────────────────────────────────────────
 // If NVS has stored values they override these defaults.
@@ -18,7 +19,7 @@
 
 #define DEFAULT_WIFI_SSID       "YOUR_WIFI_SSID"
 #define DEFAULT_WIFI_PASSWORD   "YOUR_WIFI_PASSWORD"
-#define DEFAULT_MQTT_BROKER    "192.168.1.100"
+#define DEFAULT_MQTT_BROKER    "blog.softsnail.com"
 #define DEFAULT_MQTT_PORT      1883
 #define DEFAULT_BRIGHTNESS      200
 #define DEFAULT_LANGUAGE        "en"
@@ -31,7 +32,7 @@
 
 // ─── MQTT Settings ──────────────────────────────────────────────────────────
 
-#define MQTT_BROKER         "192.168.1.100"   // Mosquitto broker IP
+#define MQTT_BROKER         "blog.softsnail.com"   // Mosquitto broker (public domain; B400A)
 #define MQTT_PORT           1883
 #define MQTT_USER           ""                 // Leave empty if no auth
 #define MQTT_PASSWORD       ""
@@ -39,6 +40,11 @@
 // MQTT Topics
 #define MQTT_TOPIC_QUERY    "warehouse/query"
 #define MQTT_TOPIC_CREATE   "warehouse/create"
+#define MQTT_TOPIC_STOCK_IN   "warehouse/stock/in"
+#define MQTT_TOPIC_STOCK_OUT  "warehouse/stock/out"
+#define MQTT_TOPIC_STOCKTAKE_START "warehouse/stocktake/start"
+#define MQTT_TOPIC_STOCKTAKE_SCAN  "warehouse/stocktake/scan"
+#define MQTT_TOPIC_STOCKTAKE_END   "warehouse/stocktake/end"
 #define MQTT_TOPIC_RESPONSE "warehouse/response/" DEVICE_ID
 
 // ─── Display Settings (ST7789T3, shared SPI bus with SD) ────────────────────
@@ -70,14 +76,22 @@
 #define BUZZER_FREQ             2700   // Buzzer frequency (Hz)
 
 #define SCAN_BEEP_DURATION_MS   100    // Buzzer beep duration on successful scan
-#define SCAN_COOLDOWN_MS        1500   // Min interval between scans (debounce)
+#define SCAN_COOLDOWN_MS        1500   // Debounce between duplicate scans of the
+                                       // SAME barcode. Short so STOCK_IN/OUT and
+                                       // STOCKTAKE can re-scan an item to count
+                                       // it again; QUERY stops the preview on a
+                                       // hit so it never re-scans anyway.
 #define SCAN_LOG_FILE           "/logs/scan_log.json"
 #define SCAN_LOG_MAX_ENTRIES    1000
 
 // ─── SD Card Settings ───────────────────────────────────────────────────────
+// NOTE: the Arduino ESP32 SD library mounts the card at SD_MOUNT_POINT ("/sd")
+// and AUTOMATICALLY prepends it inside SD.open()/mkdir(). Therefore every path
+// handed to the SD API must be CARD-ROOT-RELATIVE (e.g. "/logs/..."), WITHOUT
+// the "/sd" prefix — otherwise it resolves to "/sd/sd/logs/..." and fopen fails.
 
 #define SD_MOUNT_POINT      "/sd"
-#define SD_LOG_DIR          "/sd/logs"
-#define SD_RESOURCE_DIR     "/sd/res"
+#define SD_LOG_DIR          "/logs"
+#define SD_RESOURCE_DIR     "/res"
 
 #endif /* CONFIG_H */

@@ -641,3 +641,958 @@ init、BLE HID 檔案不存在、ui_inventory_upload 是 TODO 空殼。本 sessi
 ## build
 
 RAM 50.5% (165416)、Flash 37.9% (1193145)。
+
+---
+
+# Session 2026-10-05 — MQTT broker 修復 + 端到端查詢打通 + 契約落差盤點
+
+對應 Redmine issue #79（project `xq_xscriqf`，http://blog.softsnail.com:2024/issues/79）。
+目標：驗證 ESP32↔server 的 MQTT 鏈路。結論：**「查詢」整條鏈實測打通**；但盤點/入出庫/
+scan-input 的 topic/payload 契約與 server 不一致，接 ESP32 前需處理。本次在 server 與 broker
+端用 `mosquitto_pub/sub` 模擬 ESP32 驗證，未動硬體。
+
+## 部署拓撲（本次釐清）
+
+- **B400A** 一台同時跑 **mosquitto broker** + **barcode-warehouse-server**（FastAPI uvicorn :8040）。
+  對外網域 `blog.softsnail.com`（公網 1.34.59.237，NAT 進內網 192.168.2.223）。
+- 另一台 PC 當測試客戶端（mosquitto_pub/sub）。
+
+## Broker 修復（根因：listener 綁死內網 IP）
+
+1. mosquitto.service 開機後 `failed` → log `Opening ipv4 listen socket on port 1883. Error:
+   Cannot assign requested address`。根因：`/etc/mosquitto/mosquitto.conf` `listener 1883
+   192.168.2.223`，開機時 USB 網卡(DHCP)還沒配上該 IP → 綁定失敗。
+2. 同一個綁死 IP 還導致 **server 用 `localhost` 連 broker 時 `[Errno 111] Connection refused`**
+   （broker 只聽 192.168.2.223，不聽 127.0.0.1）。
+3. **修正**：`listener 1883 0.0.0.0`（同時涵蓋 localhost + 對外 IP），重啟 mosquitto。
+   一次解掉「開機時序綁定失敗」與「server localhost 連不上」兩個問題。
+4. 之後 server log 出現 `MQTT connected to 192.168.2.223:1883` +
+   `Subscribed to: warehouse/query, warehouse/create, warehouse/stock/in, warehouse/stock/out,
+   warehouse/stocktake/*`。
+
+## 端到端查詢驗證（實測通過 ✅）
+
+測試客戶端（先 sub 後 pub）：
+```
+mosquitto_sub -h blog.softsnail.com -t 'warehouse/response/#' -v &
+mosquitto_pub  -h blog.softsnail.com -t 'warehouse/query' -m '{"barcode":"TEST123","device_id":"local-test"}'
+```
+收到：
+```
+warehouse/response/local-test {"status": "not_found", "barcode": "TEST123", "message": "Item not found in database"}
+```
+→ 完整往返通：client → broker → server 查 DB → `warehouse/response/{device_id}` → broker → client。
+`not_found` 為正確回應（DB 無 TEST123）。證實 server 靠 payload 的 `device_id` 組回應 topic。
+
+## ⚠️ MQTT 契約落差盤點（韌體 vs server，兩端程式碼比對）
+
+| 功能 | 韌體送出 (mqtt_client.cpp / config.h) | server 期望 (mqtt_handler.py) | 一致? |
+|------|------|------|------|
+| 查詢 query | `warehouse/query` `{barcode, device_id}` | 同左 | ✅ 已實測 |
+| 回應 response | 訂閱 `warehouse/response/esp32-001` | 發 `warehouse/response/{device_id}` | ✅（DEVICE_ID=esp32-001）|
+| 建立 create | `warehouse/create` `{device_id,barcode,name,spec,quantity,location,supplier}` | 同左 | ✅ |
+| 入庫 stock/in | ❌ 韌體**無 publish 函式** | 訂閱並完整實作 `warehouse/stock/in` | ⚠️ server 有、韌體沒送 |
+| 出庫 stock/out | ❌ 韌體**無 publish 函式** | 訂閱並完整實作 `warehouse/stock/out` | ⚠️ server 有、韌體沒送 |
+| **盤點上傳** | `mqtt_publish_inventory_batch()` 發到 **`warehouse/create`**，payload `{device_id,count,items}`（items 是字串化 JSON）| `_handle_create` 期望單品 `{barcode,name,...}` | ❌ **會回 Invalid payload 錯誤，盤點完全不運作** |
+| 盤點 stocktake | ❌ 韌體無 start/scan/end | 訂閱 `warehouse/stocktake/start|scan|end`（有 session 管理 + 差異計算）| ❌ 兩端設計不同 |
+
+## 為何盤點對齊 = 實作功能，非單純改 topic（決策記錄）
+
+採方向 2（改韌體對齊 server 既有 stocktake 設計），但盤點對齊有兩個障礙，決定**本次先擱置**：
+
+1. **語意落差**：server `stocktake/scan` 需 `actual_qty`（實際盤點數量），韌體盤點目前只存
+   「掃到哪些 barcode」的 DecodeResult 清單，沒有數量語意。
+2. **非同步 session 障礙**：server 盤點是有狀態 session —— 須先 `stocktake/start` **非同步**拿到
+   `session_id`，之後每筆 `scan` 都要帶該 id，最後 `end`。韌體現在 `mqtt_publish_inventory_batch()`
+   是**同步**批次模型，接不上「發 start→等 callback 回 session_id→逐筆 scan→end」的狀態機。
+   正確做要改成狀態機，並補完盤點 UI（memory.md 既有待辦，標為半成品）。
+
+→ 結論：盤點正確對齊屬「實作一個功能」，待查詢鏈實機驗證過、actual_qty 語意定案後再做。
+
+## 下一步（優先序）
+
+1. **先接 ESP32 實機驗證「查詢」鏈**（原待辦第 1 項）：portal 配網 → WiFi → `mqtt_query_barcode()`
+   → 收 `warehouse/response/esp32-001` → `mqtt_on_response()` 顯示品項。這條 server 端已實測 OK。
+   - 韌體 config.h `MQTT_BROKER` 預設仍 `192.168.1.100`；實測需改成 `blog.softsnail.com` 或由
+     portal 設定覆蓋。
+2. 盤點：改韌體 stocktake 狀態機 + 盤點 UI 記錄每 barcode 數量（actual_qty）。見 Redmine 新 issue。
+3. 入出庫：韌體新增 `warehouse/stock/in`、`warehouse/stock/out` publish 函式。
+4. scan-input（INPUT 模式推送 Web UI）：README 宣稱 `warehouse/scan-input/{device_id}`，但
+   **server 與韌體兩端皆未實作**。
+
+## ⚠️ 安全債（broker 公網暴露，正式上線前必處理）
+
+- broker 現 `listener 0.0.0.0` + `allow_anonymous true`，且 **1883 對公網 OPEN**
+  （`blog.softsnail.com:1883` 外部可達）。mosquitto log 曾有境外連線（165.227.44.79、
+  88.210.63.16 等掃描流量）。
+- 正式用前：`allow_anonymous false` + `mosquitto_passwd` 建帳密（server `.env` 與韌體 config.h
+  `MQTT_USER/MQTT_PASSWORD` 兩端都要填，韌體 `mqtt_reconnect()` 已支援帶帳密）；有條件再加 TLS
+  （8883，可用 softsnail.com 域名簽 Let's Encrypt）。
+- broker 開機自啟：改 0.0.0.0 後綁定時序問題應緩解，仍建議確認重開機後 mosquitto 自動起來
+  （或 systemd override 加 `After/Wants=network-online.target`）。
+
+---
+
+# Memory — MQTT Contract Alignment + WiFi/Portal Session (2026-10-06..07)
+
+Context: Redmine #79 (ESP32↔server MQTT contract). Implemented firmware P1–P3,
+fixed a captive-portal crash, then chased a WiFi connectivity failure to an
+AP-side WPA3/PMF root cause.
+
+## MQTT contract alignment with barcode-warehouse-server (P1–P3)
+
+### P1 — query chain + broker default
+- `config.h`: `MQTT_BROKER` / `DEFAULT_MQTT_BROKER` → `blog.softsnail.com`.
+- `mqtt_client.cpp`: `mqtt_reconnect()` log now uses runtime `s_broker/s_port`.
+- **Bug fixed in `main.cpp` `mqtt_on_response()`**: it only handled
+  `status=="ok"` and read fields from the payload top level. The server
+  actually replies `status=="found"` with fields nested under `data`. Query
+  results were never displayed before. Rewrote to parse `found`/`not_found` +
+  `data`, and added stock/stocktake ack branches.
+
+### P2 — stock in/out
+- `config.h`: added `warehouse/stock/in|out` + stocktake topic constants.
+- `mqtt_client`: `mqtt_stock_in()/mqtt_stock_out()`, payload
+  `{device_id, barcode, quantity}` (server `_handle_stock_in/out`).
+- `ui_main`: added `SCAN_MODE_STOCK_IN` / `SCAN_MODE_STOCK_OUT`.
+
+### P3 — stocktake async session state machine
+- `mqtt_client`: `mqtt_stocktake_start/scan/end`. Old
+  `mqtt_publish_inventory_batch()` (published a `{device_id,count,items}`
+  envelope to `warehouse/create`, rejected by server as "Invalid payload") is
+  now a deprecated no-op.
+- `ui_main`: `g_st_entries[]` keeps per-barcode accumulated `actual_qty`;
+  `g_st_session_id/g_st_active/g_st_pending_start` drive the flow: enter
+  STOCKTAKE mode → publish start → server ack `stocktake_started` sets
+  session_id → each scan bumps actual_qty and publishes scan → INVENTORY-page
+  long-press publishes end.
+
+Build: `pio run` SUCCESS, RAM 50.3% / Flash 38.0%.
+
+## Captive-portal WebServer crash (LoadProhibited) — FIXED
+
+- Symptom: after WiFi connect fails, portal save → `LoadProhibited` in
+  `WebServer::sendContent` ← `_finalizeResponse` ← `handleClient` ←
+  `WiFiManager::loop()`. EXCVADDR=0x1c.
+- **Root cause**: `handleWiFiSave()` called `stopConfigPortal()` (`delete
+  server`) + reconnect from *inside* the WebServer request handler. When
+  `handleClient()` returned to `_finalizeResponse()`, the WebServer object was
+  already freed → use-after-free.
+- **Fix**: handler only sets `pendingApply=true`; `loop()` performs the
+  stop+reconnect after `handleClient()` returns (and pumps the client ~1.5s so
+  the success page is delivered first). Files: `wifi_portal.h/.cpp`.
+
+## WiFi connectivity: AP-side WPA3/PMF, NOT a firmware bug
+
+### Evidence
+- Target AP `ACC_TPE_WIFI_8F_2G`: SSID+password confirmed correct, iPhone
+  connects fine, but ESP32-S3 never associates. `WiFi.status()` diagnostics
+  showed random drift across `1 (NO_SSID_AVAIL)` / `4 (CONNECT_FAILED)` /
+  `6 (DISCONNECTED)` — the classic signature of WPA3 / PMF-required
+  association failure.
+- WPA2 hotspot `D500MA`: connected on first try
+  (`st=6→0→3`, IP 10.42.0.240) and MQTT reached
+  `blog.softsnail.com:1883` → `Connected!`. This confirms the root cause is the
+  AP's encryption/PMF policy, plus validates P1's broker default and the portal
+  crash fix end-to-end.
+
+### WT02 counter-evidence → more precise conclusion
+- `ProPrj_PLT251129004125-esp32_WT02` reportedly connects to the same
+  `ACC_TPE_WIFI_8F_2G`. Its WiFi code is essentially identical to ours
+  (plain `WiFi.mode(WIFI_STA); WiFi.begin(ssid,pwd)`, no PMF handling).
+- The real difference is the **chip**: WT02 is `board=esp32dev` (classic
+  ESP32 / WROOM); this project is `board=esp32-s3-devkitc-1` (ESP32-S3).
+- Corrected conclusion: it is **not** "ESP32-S3 cannot do WPA3". Both chips
+  support WPA3-Personal. The classic ESP32's mature WiFi supplicant negotiates
+  this particular WPA2/WPA3-mixed + PMF AP successfully, while the ESP32-S3's
+  WiFi driver/blob (arduino-esp32 framework `4.20017.260907`) fails to
+  negotiate with *this specific AP*. It is a per-AP interop issue, not a blanket
+  capability gap.
+
+### Harmful experiment reverted
+- An aggressive teardown (`WiFi.mode(WIFI_OFF)` toggling between attempts)
+  corrupted the net stack: `netstack cb reg failed 12308` and WiFi scans
+  returning empty (`Scan result length: 15` == `{"networks":[]}`). Reverted to
+  a clean minimal STA sequence (`persistent(false)` + `WIFI_STA` +
+  `setSleep(false)` + `begin`). Recovery required **reflash + full power-cycle**
+  (soft reset was insufficient); scans then returned to normal (`length=359`).
+- The cleartext password `[DEBUG]` serial log used during diagnosis was removed.
+
+### Portal UX note
+- The config page (Scan/SSID/Password/MQTT fields) is complete and renders in a
+  real browser at `http://192.168.4.1/`. Apple captive popups
+  (`GET /hotspot-detect.html`) are a restricted mini-browser with limited JS —
+  use a normal browser to operate the portal.
+
+## Options to try WPA3 from firmware (experimental, not guaranteed)
+- Explicitly enable PMF after `WiFi.begin()`:
+  `wifi_config_t.sta.pmf_cfg.capable=true` (+ `required` depending on AP), via
+  `esp_wifi_set_config(WIFI_IF_STA, &conf)`.
+- Or bump/change the `espressif32` platform version (newer S3 WiFi blob often
+  improves mixed/PMF interop).
+
+## Deployment recommendation
+- Give the scanner a **WPA2-PSK (AES) 2.4GHz SSID**, or set the target AP's PMF
+  to optional. This is the reliable, standard IoT approach.
+
+---
+
+# Memory — End-to-End MQTT Verification + CJK Font + QUERY UX (2026-10-07)
+
+Follow-on to Redmine #79. With a WPA2 hotspot (D500MA) the MQTT chain works, so
+P1–P3 were verified against the live server and the QUERY display UX was fixed.
+
+## End-to-end verification (live server blog.softsnail.com:8040 / broker :1883)
+- Test item (server DB): barcode `RAC-28VP` ("冷氣", spec 2.8KW).
+- **P2 stock-out VERIFIED**: scanning in STOCK_OUT mode →
+  `[MQTT] warehouse/stock/out: RAC-28VP x1` → server `stock_out_ok`; REST API
+  confirmed `quantity` 3 → 2 and `updated_at` bumped. Real production DB write.
+- **P1 query VERIFIED**: `[MQTT] Query sent: RAC-28VP (ok=1)` → `status=found`;
+  item details display on screen.
+- P3 stocktake: not yet exercised on hardware. NOTE its acks
+  (ui_stocktake_on_started/scanned/ended) still touch LVGL from the MQTT
+  context — same cross-task bug fixed for query below; fix when verifying P3.
+
+## Bug: MQTT response never updated the LVGL display (cross-task)
+- Symptom: server replied `found` / `stock_out_ok` correctly, but the screen
+  never showed the item.
+- Root cause: `mqtt_on_response()` runs in the MQTT/loop() context, not the
+  LVGL task, yet it called `ui_show_scan_result()` directly. LVGL widgets may
+  only be updated from the LVGL task (holding lvgl_lock) — same reason scans go
+  through a pending buffer + `ui_process_pending_scan()`.
+- Fix: added a cross-task result channel `ui_post_result(label, content)`
+  (portMUX-protected buffer) drained in `ui_process_pending_scan()` on the LVGL
+  task. `mqtt_on_response` now posts via `ui_post_result` for found/not_found/
+  stock/fallback.
+
+## Bug: item detail flashed then was overwritten
+- Root cause 1: `ui_on_scan()` unconditionally called
+  `ui_show_scan_result(type, content)` at entry, writing the raw barcode into
+  the same label the server item detail uses → race/overwrite. Fixed: QUERY
+  branch no longer double-writes; the detail line is reserved for the server
+  result.
+- Root cause 2: `SCAN_COOLDOWN_MS` was defined but NEVER applied in
+  scan_preview.cpp, so continuous scanning re-fired the decode callback every
+  frame. Fixed: added dedup/cooldown in `decode_current_frame()` (Core 0) —
+  same content within `SCAN_COOLDOWN_MS` is suppressed. Cooldown now 10000 ms.
+  CAVEAT: this cooldown is GLOBAL across modes, so STOCK_IN/OUT/STOCKTAKE cannot
+  re-scan the SAME barcode within 10 s. If per-item repeat scanning is needed
+  for P2/P3, make the cooldown per-mode (long for QUERY, short ~1.5 s for the
+  rest).
+
+## CJK (Traditional Chinese) font — subset compiled into flash
+- UI used Montserrat only (Latin) → Chinese item names ("冷氣") didn't render.
+- Toolchain: node via nvm (user-local, no sudo) + `lv_font_conv` 1.5.3.
+  `NotoSansCJK-Regular.ttc` is a collection (lv_font_conv rejects `ttcf`), so
+  fonttools (venv) extracted face index 3 = "Noto Sans CJK TC" to a standalone
+  OTF.
+- Subset: Big5 level-1 ~5401 common hanzi + ASCII, 16px bpp2 →
+  `src/ui/fonts/lv_font_cjk_tc_16.c` (2.7 MB C). Declared via LV_FONT_DECLARE;
+  scan result labels (`g_scan_lbl_barcode`, `g_scan_lbl_status`) switched to it.
+- Flash: 38.0% → 50.2% (~+386 KB). Acceptable. CAVEAT: only Big5-L1 chars; rare/
+  variant chars in item names won't render — regenerate the subset with those
+  chars added (ideally auto-collect from the server DB item names).
+
+## QUERY one-shot UX (operator presses key to scan)
+- After a query hit: stop the live preview (`ui_preview_stop()` — preview is
+  drawn by LovyanGFX outside LVGL, otherwise it paints under the result),
+  invalidate the scan PAGE object (NOT lv_scr_act(), which crashes) to repaint
+  a clean background, show only the item detail line (no "Item OK"), set
+  `g_query_result_shown`.
+- Short press when a result is shown → return HOME (instead of scanning again).
+  Flag reset on entering the SCAN page.
+- Verified on hardware: clean black screen + "冷氣 2.8KW x2 @", key returns home.
+
+## Env/tooling notes
+- node/npm via nvm: `export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"`.
+- fonttools venv at /tmp/fontvenv (ephemeral). Regen font:
+  extract TC face → lv_font_conv --size 16 --bpp 2 --format lvgl with ASCII
+  range + CJK symbols.
+
+---
+
+# Memory — P3 盤點顯示 + UI 跨 task 修復 + Serial 注入（2026-10-08）
+
+延續 Redmine #79。P1/P2 先前已實機驗證；本輪聚焦 P3 盤點顯示與一系列
+cross-task LVGL 更新問題，並加 serial barcode 注入便於測試。
+
+## 核心主題：所有「非 LVGL task 更新畫面」都要走 cross-task 機制
+LVGL widget 只能在 LVGL task（Core 1，持 lvgl_lock）更新。從 loop()/MQTT
+context 直接呼叫 lv_* 會「設了值但不刷新」。本輪把殘留的這類點全部修正。
+
+## P3 盤點顯示（兩層問題）
+1. cross-task：ui_stocktake_on_started/scanned/ended + ui_stocktake_begin/end
+   原本在 MQTT/nav context 直接改 label。改走 ui_post_result("STInfo"/"STEnd")
+   → LVGL task drain 時套用。
+2. 被預覽蓋住：盤點計數原寫在 g_scan_lbl_info(screen y~119)，但相機 viewfinder
+   由 LovyanGFX 直接畫在 screen y=85~235，每幀蓋掉文字 → 看起來「沒顯示」。
+   修法：新增 g_scan_lbl_stocktake，放在**預覽框下方**(page y=215 → screen
+   y~239，在 VF 下緣 235 外)，CJK 字型。盤點所有回饋改寫此 label。
+   實機驗證：serial 注入 RAC-28VP，預覽框下方正確顯示「冷氣 sys=2 act=3 d=+1」。
+
+## 狀態列 WiFi/MQTT 圖標一直紅色
+- 根因同上：ui_update_status() 從 loop() 直接 lv_obj_set_style_text_color，
+  cross-task 不刷新 → [W]/[M] 停在初始紅色（連上也不變綠）。
+  （wifi_is_connected()/mqtt_is_connected() 其實正確。）
+- 修法：ui_update_status() 改成只存旗標(portMUX)；新增 ui_apply_status()
+  由 LVGL task 在 ui_process_pending_scan() 開頭套色 + lv_obj_invalidate。
+  實機驗證：連上 WPA2+MQTT 後 [W]/[M] 變綠。✅
+
+## Serial barcode 注入（測試用）
+- main.cpp loop() 的 serial parser 改為**整行緩衝**：純數字行→設 VCM；單一
+  +/=/-/p→焦點微調；其他文字(含 '-'/字母的 barcode)→ ui_inject_scan()。
+- ui_inject_scan(type, content) 走與真實解碼相同的 cross-task pending-scan
+  buffer，繞過 Core 0 的 dedup cooldown（測試時可連續注入同碼）。
+- 用法：serial 打 RAC-28VP⏎ 即模擬掃描。限 SCAN 頁 + 對應模式有效。
+  實機驗證：[SERIAL] inject barcode: RAC-28VP → stocktake/scan 正常。
+
+## 重入 SCAN 頁
+- 清殘留文字：進 SCAN 頁清空 barcode/status/stocktake labels（但**不重置**
+  g_st_* session 狀態，open session 可跨頁存活）。
+- 重建 session：若在 COUNT 模式但無 active session（離開再回來、session 已失效），
+  show_page SCAN 分支自動補發 ui_stocktake_begin()。修「No session」問題。
+
+## 狀態（build 皆 SUCCESS，RAM ~50% / Flash ~50%）
+- 實機已驗證：serial 注入、盤點計數顯示（預覽框下方）、WiFi/MQTT 圖標變綠。
+- 待實機驗證：重入清畫面、COUNT 重入自動重建 session（本輪最後兩項，使用者
+  exit 前未測）。
+
+## 修改檔案
+- src/ui/ui_main.cpp / src/ui/ui_main.h（cross-task result/status、盤點 label、
+  ui_inject_scan、重入清畫面+重建 session）
+- src/main.cpp（serial 整行解析 + barcode 注入）
+
+
+---
+
+# Session 2026-10-19 — LVGL 雙 disp/indev 整理（單一真相源）+ 觸控 indev 正確掛上
+
+對應上一個 touch session 的待辦：「LVGL indev 路徑待整理：main.cpp 有雙 disp 註冊
+（display_init 一個 + main 自己一個），touch indev 段被註解，touch_read 其實沒被 LVGL 呼叫」。
+本次把 LVGL 設定統一到 `display.cpp`，移除 `main.cpp` 的重複設定。純軟體整理 + `pio run`
+驗證；實機未測（硬體不在手邊）。
+
+## 根因：兩套 LVGL 設定互相打架
+
+`main.cpp setup()` 先呼叫 `display_init()`（display.cpp），**之後又自己做了一整套 LVGL 設定**：
+
+| 項目 | display.cpp display_init()（正確但被蓋掉） | main.cpp setup()（實際生效的第二套） |
+|------|------|------|
+| lv_init | ✅ | ⚠️ **重複呼叫** |
+| draw buf | PSRAM `buf1/buf2`（40 行/buf） | 另一組 `buf1/buf2`（1/4 螢幕） |
+| disp 註冊 | `lvgl_flush_cb`（**帶 s_spi_mutex**） | `flush_cb`（**忽略 mutex** + `[FLUSH]` debug 印） |
+| touch indev | ✅ 註冊 `lvgl_touch_cb`→`touch_read` | ❌ 整段註解（舊 LoadProhibited 遺留） |
+| esp_timer tick | ❌ 無 | ✅ 2ms |
+
+LVGL 以**最後註冊**的 disp 為 default → 實際跑的是 main.cpp 那套。後果：
+1. **touch indev 從沒被掛上** → `touch_read` 永遠不會被 LVGL 呼叫（就算硬體修好也收不到事件）。
+2. **作用中的 flush 忽略 `s_spi_mutex`** → 這是 latent SPI race：`scan_preview` 的 render task
+   (Core 1) 會 `xSemaphoreTake(s_spi_mutex)`，`scan_preview_start()` 也 `display_set_spi_mutex()`
+   把 mutex 設進 display.cpp 的全域，**但作用中的 main.cpp flush 根本不讀它** → 正是
+   Session 2026-09-22 根因 #4 打過的那種跨 task SPI 交錯，只是被第二套 disp 重新引入。
+
+## 修正
+
+**display.cpp = 單一真相源**（display_init 現含全部）：
+- 既有：`lv_init` + PSRAM draw buf + disp(`lvgl_flush_cb` 帶 `s_spi_mutex`) + touch indev(`lvgl_touch_cb`)。
+- **新增**：`#include <esp_timer.h>`、`lvgl_tick_cb`（`lv_tick_inc(2)`）、在 `display_init()` 尾端
+  `esp_timer_create/start_periodic(2000us)`。tick 從 main.cpp 搬過來（`lv_conf.h` `LV_TICK_CUSTOM 0`
+  所以 tick 必要）。
+- touch indev 註解補一段：`touch_init()` 永遠回 true（容錯），CST816 硬體死，`lvgl_touch_cb`
+  每次回 RELEASED（無害）；indev 掛好，硬體修/換好後**免改碼**即可用。
+
+**main.cpp 移除第二套**：
+- 刪 `buf1/buf2/draw_buf` 靜態、`flush_cb`、`lvgl_tick_cb`。
+- setup() 刪整段 buffer alloc + `lv_init` + `lv_disp_draw_buf_init` + 第二個 `lv_disp_drv_register`
+  + 註解掉的 indev + 第二個 esp_timer tick。
+- **保留** `g_lvgl_mux = xSemaphoreCreateRecursiveMutex()`（`lvgl_task()` 的 `lvgl_lock` 用，與
+  display 無關）。
+- **保留** line 64 `static lgfx::LGFX_Device& tft = display_get_tft();`（`update_btn_ui` 等直接
+  LovyanGFX 繪圖仍用）。
+- `#include <esp_timer.h>` 留著（檔頭註解仍述 tick 設計，無害；已無 esp_timer_ 呼叫）。
+
+## 觸控結論（不變）
+
+CST816D 硬體不通（Session 2026-10-04 定案：I2C bus 正常、IMU 0x6B 可讀、驅動與官方逐字相同，
+但觸控晶片全無 ACK/ID → 晶片/FPC 故障）。驅動碼完整保留，indev 現正確掛上，**硬體修好即可用**。
+操作暫維持 BOOT 單鍵 + serial 注入。
+
+## build
+
+`pio run` SUCCESS：RAM 50.4% (165144 / 327680)、Flash 50.2% (1580301 / 3145728)。
+（先前 50.5%/165416 → 略降，少一組重複 disp 驅動結構 + 單一 draw buf 配置路徑。）
+
+## 待實機驗證
+
+1. 畫面正常刷新（現在走 display.cpp 的 mutex-aware `lvgl_flush_cb`，非 main.cpp 舊 flush）。
+2. 掃描預覽期間不再有 SPI race（flush 現真正尊重 `s_spi_mutex`）——Session 2026-09-22 根因 #4
+   的根治從此對作用中的 flush 生效。
+3. 觸控硬體若更換/修復，indev 應立即收到事件（無需改碼）。
+
+## 修改檔案
+
+- src/display/display.cpp（+esp_timer.h、+lvgl_tick_cb、display_init 尾端起 tick、touch indev 註解補充）
+- src/main.cpp（移除第二套 LVGL 設定：buf/flush_cb/tick_cb/第二 disp/註解 indev；保留 g_lvgl_mux、tft）
+
+
+---
+
+# Session 2026-10-20 — Phase A：韌體 GUI 頁面結構對齊 web-sim 模擬器
+
+使用者要求「先 A 再 C」：A = 讓 PlatformIO 實機韌體的 LVGL GUI 頁面結構對齊 web-sim
+（web-sim/index.html，純前端模擬器，當 UI 規格藍本）；C = 之後補後端讓功能真的能動。
+本 session 完成 Phase A（純 UI 骨架對齊，不碰 BLE/網路後端）。每步 pio run 驗證，最後 clean
+full rebuild SUCCESS。實機未測（硬體不在手邊）。
+
+## 差異盤點（web-sim vs 韌體 before）
+
+web-sim 有 9 頁（home/scan/result/photo/settings/inventory/inventory-list/log/about），韌體只有
+5 頁（HOME/SCAN/SETTINGS/INVENTORY/PHOTO）。HOME 選單 web-sim 4 項、韌體 3 項。查詢結果 web-sim
+有獨立 6 欄位頁、韌體只塞一行 label。設定頁 web-sim 7 項清單、韌體只有單一亮度 slider。
+
+## 單鍵導航模型（關鍵適配）
+
+web-sim 靠滑鼠點按/方向鍵；韌體只有 BOOT 單鍵（觸控硬體不通）：
+短按=NAV_NEXT(移焦點/下一項)、長按=NAV_CONFIRM(確認)、長按住>2s=NAV_HOME(回首頁，全域攔截)。
+所以 web-sim 的多按鈕頁在韌體改成「焦點環 index + NAV_NEXT 循環 + NAV_CONFIRM 執行」。
+
+## 實作（7 步，只動 ui_main.h/.cpp + main.cpp mqtt_on_response）
+
+- Step 1：ui_page_t 新增 UI_PAGE_RESULT/INVENTORY_LIST/LOG/ABOUT。HOME_ITEM 3→4
+  (SCAN/INVENTORY/SETTINGS/ABOUT)，labels 改中文「掃描/盤點/設定/關於」+ 按鈕字型改
+  lv_font_cjk_tc_16。4 項仍在既有垂直置中演算法內(4*50+3*8=224<296)。
+- Step 2：ABOUT 獨立頁（BOARD_NAME/vFW_VERSION/HW ESP32-S3/Display ST7789T3/Camera OV5640/ID）。
+  on_home_select(ABOUT) 改導 UI_PAGE_ABOUT，移除舊「借 scan 頁顯示版本」。nav CONFIRM 回 HOME。
+- Step 3+4：RESULT 獨立頁（標題+barcode+6 欄位 品名/規格/數量/儲位/供應商/入庫日+兩鈕 重掃/回主頁，
+  g_result_focus 焦點環）。接真實查詢：新增結構化跨 task buffer g_item_*（portMUX，比照既有
+  ui_post_result 模式）+ ui_post_result_item()；main.cpp mqtt_on_response found 分支改呼叫它（補齊
+  supplier/date_in，barcode 取 data["barcode"]）；ui_process_pending_scan() 開頭 drain g_item_pending
+  → ui_preview_stop + result_populate + show_page(RESULT)。
+  **移除**舊 label=="Item" 分支與 g_query_result_shown 整套（宣告+reset+SCAN NEXT 判斷）；SCAN NEXT
+  現永遠 scan_preview_request_hires()，QUERY 命中改由 RESULT 頁承接。
+- Step 5：INVENTORY_LIST 頁（標題+共N筆+可捲動 flex column 清單，invlist_render 讀真實
+  g_st_entries[]/g_st_entry_count，空=「尚無資料」+返回/上傳全部 g_invlist_focus）。INVENTORY 頁
+  NAV_NEXT 改 render+show INVENTORY_LIST（對齊 web-sim「查看盤點清單▶」），CONFIRM 仍結束 session。
+- Step 6：LOG 頁 placeholder（標題+日期 label g_log_day_offset 0..-6 循環「今日/N天前」+body
+  「尚無紀錄(待Phase C接SD卡)」+hint）。nav NEXT 換日、CONFIRM 回 SETTINGS。**不接 SD。**
+- Step 7：SETTINGS 由單 slider 擴充為 7 列可聚焦清單(WiFi/MQTT/BLE/亮度/音量/語言/工作日誌)。
+  flex column 可捲動；settings_refresh() 讀 wifi_is_connected()/mqtt_is_connected() 唯讀顯示；
+  BLE「未配對」、音量「60%」stub；語言 g_settings_lang_zh 切換；LOG「檢視▶」。update_settings_focus()
+  邊框+底色 COL_FOCUS + scroll_to_view。nav NEXT 移焦點(亮度列特例：短按+40 wrap 套
+  display_set_brightness)；CONFIRM 依列 套亮度/切語言/進 LOG/唯讀。
+
+## Phase A stub（UI 做出、資料佔位，留給 Phase C）
+
+- LOG 清單：placeholder，不讀 scan_log/SD。
+- SETTINGS BLE「未配對」、音量「60%」：純顯示。WiFi/MQTT 唯讀狀態（無配網/broker 設定子頁）。
+- INVENTORY_LIST「上傳全部」= ui_stocktake_end() 批次 commit（每筆 scan 本就已 publish）。
+- 語言切換目前只改 settings 顯示字，未接全域 i18n。
+
+## 留給 Phase C（本次完全不碰）
+
+BLE HID 實際鍵盤輸出；工作日誌真實 SD 讀寫；WiFi/MQTT/BLE 設定子頁；音量實際輸出；
+web-sim 的 INPUT 子通道(BLE/MQTT 切換)、offline queue sync icon 等後端相依互動；
+PHOTO 頁互動流程（web-sim 有拍照/上傳按鈕，韌體 PHOTO 頁仍為簡版，Phase A 未納入對齊範圍）。
+
+## build
+
+每步 pio run SUCCESS。最終 clean full rebuild：RAM 50.6% (165704 / 327680)、
+Flash 50.4% (1584917 / 3145728)。4 新頁僅 +~4.5KB Flash。
+
+## 待實機驗證
+
+1. HOME 4 項中文顯示 + 單鍵焦點循環 + 長按進入。
+2. QUERY 命中自動跳 RESULT 頁、6 欄正確、相機殘影被覆蓋、重掃回 SCAN、回主頁回 HOME。
+   ⚠️ RESULT 頁 show_page 會 anim slide-in；需確認 ui_preview_stop 後相機不再蓋頁（RESULT 頁
+   進入已 ui_preview_stop）。
+3. 盤點→INVENTORY→短按進 INVENTORY_LIST 顯示真實筆數/數量。
+4. SETTINGS 清單焦點循環+自動捲動、亮度單鍵調整、語言切換、工作日誌入口進 LOG。
+5. ABOUT/LOG 導航返回正確。
+
+## 修改檔案
+
+- src/ui/ui_main.h（ui_page_t +4、ui_post_result_item 宣告）
+- src/ui/ui_main.cpp（4 新頁 create+nav+show_page+hide_all、HOME 4 項、結構化 result buffer、
+  SETTINGS 清單化、共用 helpers create_page_container/create_action_btn/set_btn_focused）
+- src/main.cpp（mqtt_on_response found → ui_post_result_item 6 欄）
+
+
+---
+
+# Session 2026-10-20 (續) — Phase C 第一項：接通 SD 工作日誌
+
+承 Phase A（GUI 骨架對齊，LOG 頁為 placeholder）。本輪做 Phase C 第一項：把 SD 工作日誌從
+dead code 接成真的會記錄、LOG 頁讀真實資料。純軟體接線 + pio run 驗證；實機未測。
+
+## 現況盤點（又一個「後端完整但從未接線」）
+
+scan_log.cpp / sd_card.cpp 後端實作完整（date-based JSON Lines + pending 離線佇列 + sync），
+但 grep 證實 **sd_card_init() / scan_log_init() / scan_log_add() 從未被 main.cpp 或掃描路徑呼叫**
+→ SD 卡從未掛載、從未記錄任何東西。同 memory.md 2026-10-04 揭露的「Phase 標✅但沒接線」模式。
+另一個隱患：**全韌體無 NTP 時間同步**，time(nullptr) 停在 1970 epoch → 日期檔名與時間戳全錯
+（所有紀錄會落在 1970-01-01.json）。
+
+## 接線（5 步，每步 pio run）
+
+- Step 1：main.cpp setup() 在 display_init 之後（LCD 先占 FSPI bus）、nvs_init 之後掛載
+  sd_card_init()（成功印 used/total MB + scan_log_init()；無卡 graceful 失敗印「work log
+  disabled」）。加 include storage/sd_card.h + scan_log.h。
+- Step 2：scan_log 新增字串版入口 scan_log_add_entry(type, content)，供 UI 層用（免依賴 decoder
+  的 DecodeResult）。重構出共用 scan_log_write(type, content) 建 JSON {ts,type,content} 寫當日檔
+  +pending；scan_log_add(DecodeResult&) 與 scan_log_add_entry 都走它。
+- Step 3：ui_main.cpp ui_on_scan() 開頭用 mode_tags[g_scan_mode]（QUERY/INPUT/IN/OUT/COUNT）呼叫
+  scan_log_add_entry(tag, content)，每次掃描都記錄。在 LVGL task（Core 1）執行，與 LCD flush 同核
+  序列化（SD 走共用 FSPI bus）。
+- Step 4：main.cpp on_wifi_connected() 加 configTzTime("CST-8", pool.ntp.org, time.google.com,
+  time.cloudflare.com)。解決 1970 epoch → 日期正確。TZ=台灣 CST-8（無 DST）。
+- Step 5：LOG 頁接真實資料（取代 Phase A placeholder）。scan_log 加
+  scan_log_date_for_offset(day_offset, buf, len)（time(nullptr)+offset*86400 strftime）。ui_main.cpp
+  引入 ArduinoJson；log_render() 讀 scan_log_read(date,0,50)→StaticJsonDocument<4096> 解析 JSON
+  array→逐筆「HH:MM:SS type content」（ts 取 'T' 後的時間），空=「尚無紀錄」。日期 label 改真實
+  「◀ YYYY-MM-DD ▶」。show_page LOG 進入 reset offset=0 + render；LOG NAV_NEXT 換日（0..-6 循環）
+  + re-render。
+
+## ⚠️ SPI 共用 bus 風險（待實機驗證）
+
+SD 與 LCD 共用 FSPI (SPI2)，LovyanGFX 以 bus_shared(use_lock=true) 跑。但 SD 走 Arduino SD lib
+的獨立 SPIClass(FSPI)，**不取 LVGL flush 用的 s_spi_mutex**。scan_log 寫入在 LVGL task（Core 1）
+與 LCD flush 同核序列化，理論上降低衝突，但兩者是不同鎖機制——需實機確認掃描寫 SD 時不會干擾
+LCD（參照 Session 2026-09-22 根因 #4 的 SPI race 教訓）。若實機有問題，應讓 SD 存取也取
+s_spi_mutex。
+
+## build
+
+每步 pio run SUCCESS。最終 clean full rebuild：RAM 50.7% (165988 / 327680)、
+Flash 52.2% (1643173 / 3145728)。較 Phase A +~58KB（ui_main 引入 ArduinoJson 解析器）。
+
+## 待實機驗證（開發環境無法確認）
+
+1. SD 卡實際掛載（serial「SD mounted: x/y MB」）、目錄 /sd/logs 建立。
+2. 掃描後 scan_log_add_entry 真的寫入當日 JSON（serial「[LOG] #n: ...」）。
+3. NTP 同步後 time 正確（日期檔名 YYYY-MM-DD 非 1970）。
+4. LOG 頁顯示當日真實紀錄（HH:MM:SS 模式 內容）、換日切不同檔。
+5. SD 寫入 + LCD flush 共用 FSPI 無衝突（SPI race）。
+
+## 留給 Phase C 後續
+
+BLE HID；WiFi/MQTT/BLE 設定子頁；音量；INPUT 子通道（BLE/MQTT 切換）；pending 佇列
+WiFi 重連自動 sync（scan_log_sync_pending 已實作但確認有被呼叫）；LOG 頁 pending/離線標示。
+
+## 修改檔案
+
+- src/main.cpp（SD 掛載 + scan_log_init + NTP configTzTime）
+- src/storage/scan_log.h / .cpp（scan_log_add_entry、scan_log_write 共用、scan_log_date_for_offset）
+- src/ui/ui_main.cpp（ui_on_scan 記錄、LOG 頁 log_render 讀真實資料 + ArduinoJson）
+
+
+---
+
+# Session 2026-10-20 (續2) — SD 工作日誌實機測試：抓到並修好 2 個 bug
+
+承上接線完 SD 工作日誌後，使用者要求「先測試再 BLE HID」。板子接在 /dev/ttyACM0
+（Espressif 303a:1001 USB JTAG/serial，udev 規則已套，0666）。實機燒錄＋序列埠測試，
+抓到 2 個真 bug 並修好，最終實機驗證寫入成功。
+
+## 測試方法與 ESP32-S3 USB-CDC 的坑
+
+- ARDUINO_USB_CDC_ON_BOOT=1：板子一 reset，USB-CDC 會 drop + 重新列舉，開著的 cat fd 會失效 →
+  直接 `cat /dev/ttyACM0` 抓不到開機 banner。解法：用 pyserial 迴圈，reset(DTR/RTS 脈衝)後
+  retry 重開 port 讀 ~8s，吃過重新列舉。esptool 與 cat 不能同時開 port（互搶）。
+- **序列埠測試加了 nav 指令**：原本序列只有「數字=VCM、+/-/p=焦點、其他文字=inject barcode」，
+  無法用序列導航（inject 只在 SCAN 頁才會進 ui_on_scan）。新增單字元 `n`=NAV_NEXT、
+  `c`=NAV_CONFIRM、`h`=NAV_HOME（main.cpp loop 序列解析），讓無實體按鍵也能驅動導航測試。
+  符合既有 serial-inject 測試哲學，保留於碼內。
+
+## Bug #1：SD 路徑重複 /sd/sd/（已修）
+
+實機 inject 後：`fopen(/sd/sd/logs/1970-01-01.json) failed`。根因：Arduino ESP32 SD lib 內部
+掛載在 SD_MOUNT_POINT="/sd" 並**自動前綴**，所以傳給 SD.open() 的路徑必須**相對卡根**。
+config.h 的 SD_LOG_DIR 是 "/sd/logs" → 變成 /sd + /sd/logs = /sd/sd/logs。
+修：SD_LOG_DIR "/sd/logs"→"/logs"、SD_RESOURCE_DIR 同理去 /sd 前綴。
+
+## Bug #2：此卡 SD.mkdir 全失敗（已繞過）
+
+修完路徑後仍 `fopen(/sd/logs/1970-01-01.json) failed`。加診斷定位：
+- `[SD] Card type: SD, Size: 1910MB` + `root write test: open=1` + `exists(/sdtest.txt)=1`
+  → **卡能掛載、能在根目錄寫檔**。
+- `SD.mkdir(/logs)=0 exists=0`、`SD.mkdir(/wlog)=0 exists=0` → **mkdir 對任何名字全失敗**，
+  但根目錄檔案寫入正常。（root 既有 `System Volume Information/`、`MAP/` 是 PC 建的。）
+- 結論：此卡／lib／共用 SPI 組合**無法建立目錄**，但根目錄檔案讀寫正常。這是 ESP32 Arduino SD
+  + 某些卡的已知 FAT/SPI 怪癖。
+- **修法：改用扁平根目錄檔案**，不用子目錄：`/log_YYYY-MM-DD.json`（每日）、
+  `/pending_queue.json`（離線佇列）。scan_log.cpp log_file_path/pending_file_path/scan_log_read
+  全改根層；scan_log_init 移除 mkdir；sd_card_init 移除 mkdir + 診斷。
+
+## 實機驗證通過 ✅
+
+- 燒錄 → HOME→SCAN(序列 h,c) → inject `WLOG-AAA`/`WLOG-BBB`：
+  `[LOG] #1: WLOG-AAA`、`[LOG] #2: WLOG-BBB` **寫入成功，無 fopen error**。
+- 導航到 LOG 頁（h → n,n → c 進 SETTINGS → n×6 → c 進 LOG）：全程無 crash、無 SPI error，
+  LOG 頁 render（scan_log_read + ArduinoJson 解析）執行正常（render 無序列輸出屬正常）。
+- **SD 寫入 + LCD flush 共用 FSPI 無衝突**（先前擔心的 SPI race 未出現；root write test 與
+  正常 logging 期間 LCD 預覽同時運作無異常）。先前根因 #4 的隱患在此 flat-file 路徑下未重現。
+
+## 仍待確認（非阻斷）
+
+- **NTP 未同步時日期為 1970**：測試時 WiFi AP（D500MA）不在，WiFi `st=1 NO_SSID_AVAIL`，
+  configTzTime 未跑 → 檔名 `/log_1970-01-01.json`。有 WiFi 時 NTP 同步後日期會正確（Step 4 邏輯
+  已驗證會呼叫，只是這次沒 AP）。待有 WPA2 AP 時補驗日期正確性。
+- LCD 畫面內容未目視（無法遠端看螢幕）；以「無 crash + 寫入成功 + render 無誤」間接驗證。
+
+## build（最終 clean rebuild）
+
+RAM 50.7% (166008)、Flash 52.3% (1645005 / 3145728)。
+
+## 修改檔案（本段）
+
+- src/config/config.h（SD_LOG_DIR /sd/logs→/logs、SD_RESOURCE_DIR 去 /sd）
+- src/storage/scan_log.cpp（log/pending/read 路徑改 /log_*.json、/pending_queue.json 根層；
+  init 移除 mkdir）
+- src/storage/sd_card.cpp（移除 mkdir + 測試診斷，註明 flat-file 原因）
+- src/main.cpp（序列 nav 指令 n/c/h 供測試）
+
+
+---
+
+# Session 2026-10-20 (續3) — SD 工作日誌「尚無紀錄」實機除錯 → 根因是 SD 卡硬體故障
+
+使用者實機看 LOG 頁顯示「尚無紀錄」。序列 dump 也回 `today's log: []`。但稍早明明看到
+`[LOG] #n` 寫入成功。追查後**根因確定是 SD 卡本身無法 commit 寫入（故障/山寨卡），非韌體 bug**。
+過程中順手修了 3 個真的韌體 bug，並加了開機健檢。
+
+## 除錯歷程（每步序列數據）
+
+1. **現象**：write 報成功（`[LOG] #1: xxx`）但同 session dump `today's log: []`，且每次開機
+   `[LOG] Init: total=0`（跨重開機讀回都空）。
+2. 加 dump 診斷：`dump path=/log_1970-01-01.json exists=1 rawlen=0` → 檔案**存在但 0 bytes**。
+   （日期 1970 是因無 WiFi→NTP 沒同步，與此 bug 無關。）
+3. 疑 readString() → 改 size-based read loop。無效。
+4. 疑 SPI 共用 bus 競爭 → sd_card read/write 加 s_spi_mutex + flush。無效（離開 SCAN 頁、
+   preview 停了也一樣 0 bytes）。
+5. 加開機自測（bus 絕對靜止、無 preview/LVGL）：`FILE_WRITE nwrote=13 size=0 rblen=0`
+   → **純 write/read round-trip 就失敗**，與 LCD/preview 無關。
+6. 疑 SPI 速度 → SD_SPI_FREQ 20MHz→4MHz。無效。
+7. **決定性證據**：`raw.write nwrote=13 size=0 rblen=0 used:4915200->4947968`
+   → print/write 回報 13 bytes、**usedBytes 增加 32768（配置了一個 cluster）**，但**檔案 size 仍 0、
+   讀不到資料**。
+
+## 根因：SD 卡故障 / 山寨卡（硬體，非韌體）
+
+證據鏈：
+- 卡能掛載、報 size(1910MB)、exists/remove(metadata)正常。
+- mkdir 對所有名字全失敗；data write 配置了 cluster(usedBytes+32KB)但 size 恆 0、讀不回。
+- 20MHz 與 4MHz 行為一致；跨重開機一致。
+- 32KB cluster 對 2GB FAT32 偏大 → 疑**山寨容量/異常格式化卡**。
+這是典型「卡接受寫入、配置 cluster，但不 persist 資料到實體媒體」的故障卡特徵。
+韌體路徑本身已證實正確（write 回成功、路徑/日期/讀取邏輯皆對）。
+
+## 本輪順手修的 3 個真韌體 bug（在找到硬體根因前）
+
+1. **SD 路徑重複 /sd/sd/**（config.h SD_LOG_DIR /sd/logs→/logs；Arduino SD lib 自動前綴 /sd）。
+2. **SD.mkdir 全失敗** → 改用扁平根目錄檔 /log_YYYY-MM-DD.json、/pending_queue.json（無子目錄）。
+3. **readString() 回空** → sd_card_read_file 改 size-based read loop（available()+read()）。
+這 3 個都是真實缺陷，即使換好卡也該保留這些修正。
+
+## 保留的改善
+
+- **開機 SD 寫入健檢**（sd_card_init 尾端）：寫一個 byte 再讀回，若 size==0 → 印
+  `[SD] WARNING: write did not commit ... work log DISABLED` 並 `_mounted=false`。
+  **實機驗證此卡正確觸發警告並停用 logging**（避免靜默掉資料）。換好卡後會印 `write-commit OK`。
+- SD read/write 加 s_spi_mutex 守護（防未來真的共用 bus 競爭；此卡問題雖非此因，但本就該有）。
+- SD_SPI_FREQ 降 4MHz（SPI SD 安全標準速率，保留）。
+- 序列指令：n/c/h（導航）、d（dump 今日日誌）供測試。
+
+## 待辦（硬體）
+
+- **換一張正常的 microSD 卡**（建議知名品牌 ≤32GB，FAT32 正常格式化）。換卡後開機應見
+  `[SD] write-commit OK` + `[MAIN] SD mounted`，工作日誌即可正常記錄/讀回。
+- 換卡後補驗：掃描→[LOG] #n→LOG 頁顯示紀錄；有 WPA2 AP 時 NTP 同步→日期正確。
+
+## build（最終 clean rebuild）
+
+RAM ~50.7%、Flash ~52%。健檢實機觸發警告正常。
+
+## 修改檔案（本段）
+
+- src/config/pinout.h（SD_SPI_FREQ 20M→4M）
+- src/storage/sd_card.cpp（s_spi_mutex 守護、size-based read、開機寫入健檢、bad-card 停用）
+- src/storage/scan_log.cpp（扁平根目錄路徑 — 上一段已改）
+- src/main.cpp（序列 d dump 指令）
+
+## ✅ 換卡後實機驗證通過（2026-10-20 收尾）
+
+換上新 SDHC 4GB 卡後實機全鏈驗證 OK：開機 `[SD] write-commit OK` + `SD mounted 23/3807MB` +
+`[LOG] Init: total=2 pending=2`（讀回既有）；SCAN 注入 NEWCARD-1/2 → dump 讀回 4 筆完整 JSON
+（ts/type/content 齊全，新舊都在）；LOG 頁導航 render 無 crash。SD 工作日誌確認可用，先前兩張卡
+為故障/山寨卡。時間戳仍 1970（測試環境無 WPA2 AP，NTP 未同步；接上 WiFi 後自動轉真實時間，不影響功能）。
+
+---
+
+# Session 2026-10-21 — BLE HID 無線條碼槍實作 + 實機驗證（Phase C）
+
+README 核心賣點，先前完全未實作(無 ble_hid.* 檔、INPUT 模式只印 TODO)。本 session 從零做完
+並實機燒錄+手機配對驗證通過。採「NimBLE 自寫薄層 HID + 按需啟動」策略。
+
+## 函式庫選型
+
+- lib_deps 加 h2zero/NimBLE-Arduino@^2.2.3。**不用** T-vK/ESP32-BLE-Keyboard(對 arduino-esp32
+  3.x 相容差)。自寫薄層 src/network/ble_hid.h/.cpp 只依賴 NimBLE 本體 + NimBLEHIDDevice，避開
+  第三方 keyboard fork 版本相容債。
+- 環境: espressif32 7.1.3 / arduino-esp32 3.x(framework 4.20017)。SDK 內建 Bluedroid 控制器
+  (CONFIG_BT_BLE_ENABLED=y, 非 IDF NimBLE)；NimBLE-Arduino 跑在其上可編譯。
+- config.h 加 BLE_DEVICE_NAME "SoftSnail"。
+
+## ble_hid API
+
+begin/stop/is_started/is_connected/type_line(str,含尾端 Enter)/set_stopped_cb。
+HID_REPORT_MAP=標準 boot keyboard(report id 1)；ascii_to_hid US layout 完整對應表；
+send_key 逐字 press+release 各 delay 8ms。
+
+## 實機除錯：依序突破 5 個關卡(每個都以 serial/配對實測定位)
+
+1. **NimBLE 能否編譯/放得下**：可。Flash 52%→58%(+182KB NimBLE)、RAM +靜態。
+2. **WiFi/BLE 共存 abort**(coex_core_enable)：WiFi 開著啟用 BT 控制器就 abort。根因=單一
+   2.4GHz radio。修:ble_hid_begin 先 esp_wifi_stop()+esp_wifi_deinit()(完全釋放 WiFi)。
+3. **廣播掃不到名稱**(使用者找不到 SoftSnail)：NimBLE 2.x 不自動放 device name。修:明確
+   adv->setName(BLE_DEVICE_NAME)+enableScanResponse(true)。
+4. **配對後 HID 連線建不起來**(onConnect 從不觸發)：缺 Just-Works。修:setSecurityIOCap(
+   BLE_HS_IO_NO_INPUT_OUTPUT)+setSecurityAuth(true,false,true)+setPower(ESP_PWR_LVL_P9)。
+   → 實機手機配對成功、`[BLE] host connected`、送字 "SoftSnail-BLE-TEST-123" 完整打進文字框
+   (英文輸入法下;中文 IME 會把字母攔截轉中文字=主機端問題非韌體)。
+5. **INPUT 模式 OOM**(送字送一半 BLE_INIT Malloc failed，使用者只收到 "GUN78")：相機預覽+
+   BLE 堆疊同時吃內部 DRAM，連線下只剩 3.5KB。根因=BLE 控制器需 ~89KB internal DRAM。修:
+   INPUT 模式完全釋放 WiFi DRAM(esp_wifi_deinit，已在 #2)騰出~24KB;且 scan_preview
+   framebuffer(60KB)移 PSRAM。→ 連線下 internal DRAM 26.7KB，實機 inject "GUN-FULL-12345"
+   完整打進文字框、無 Malloc failed。
+   ⚠️ 量 heap 要看 MALLOC_CAP_INTERNAL(非 total，total 含 PSRAM 會誤判)。
+
+## UI 接線(Step 6)
+
+- 狀態列加 [B] 圖示:灰=關/紅=等待配對/綠=已連線。ui_apply_ble_status() 每 tick 查 BLE 狀態著色
+  (只在變化時 repaint)。W/M/B 右對齊 -80/-52/-24。
+- 設定頁 BLE 列顯示真實 關閉/等待配對/已連線。
+
+## 按需啟動(Step 5)
+
+ui_cycle_scan_mode 切到 INPUT→ble_hid_begin、切離→ble_hid_stop；show_page 進 SCAN 若已 INPUT
+則 begin、離開 SCAN 頁→stop。ble_hid_stop 走 s_stopped_cb 回呼讓 main.cpp 重建 WiFi
+(g_wifi.begin()+mqtt_client_init())。
+
+## 共存壓測(Step 7)抓到並修好 2 個 crash
+
+1. **PC=0 InstrFetchProhibited**(離開 INPUT)：onDisconnect 在 teardown 中呼叫
+   startAdvertising() 於半 deinit 堆疊。修:s_stopping 旗標，teardown 時 onDisconnect return；
+   stop 時 s_stopping=true + delay(20) 再 deinit。
+2. **assert "free target outside heap"**(NimBLEServer::~ 刪 callbacks)：s_server_cb 是 static
+   全域，NimBLEDevice::deinit 會 delete 它→刪靜態物件 crash。修:改 new HidServerCallbacks()
+   (NimBLE 擁有並 free)。
+壓測:INPUT進→連線(27KB)→離開(無crash,DRAM 回 114KB=WiFi+BLE 全回收無洩漏)→再進→再離開，穩定。
+
+## 設計取捨(重要)
+
+**BLE 槍(INPUT)模式下 WiFi/MQTT/查詢不可用** —— 單一 radio + 內部 DRAM 不足以讓 WiFi 與 BLE
+堆疊同時常駐，故 INPUT 模式 deinit WiFi 換 BLE，離開 INPUT 才重建 WiFi。對「無線條碼槍打字到
+配對主機」的使用情境是合理的(槍模式本就不需要查後端)。
+
+## 最終 build
+
+clean rebuild: RAM 52.6% (172432 / 327680)、Flash 58.1% (1827485 / 3145728)。
+
+## 實機已驗證
+
+手機配對 SoftSnail → `[BLE] host connected` → INPUT 模式掃描(serial inject)值
+"GUN-FULL-12345" 完整打進文字框含 Enter → 離開 INPUT WiFi 重建 → begin/stop 循環無 crash 無洩漏。
+
+## 保留的 serial 測試指令(main.cpp loop)
+
+n/c/h=導航(NEXT/CONFIRM/HOME), b/B=BLE begin/stop, t=BLE 送測試字串, s=狀態+heap(total/
+internal/psram), d=dump 工作日誌, 純數字=VCM 焦點, +/=/-/p=焦點微調。
+
+## 修改檔案
+
+- platformio.ini(NimBLE-Arduino@^2.2.3)
+- src/config/config.h(BLE_DEVICE_NAME)
+- src/network/ble_hid.h/.cpp(新檔，薄層 HID keyboard)
+- src/ui/ui_main.cpp(ui_on_scan INPUT 送 BLE、按需 begin/stop、狀態列[B]、設定頁 BLE 狀態)
+- src/main.cpp(ble_hid_set_stopped_cb 重建 WiFi、serial b/B/t/s 指令)
+- src/scan_preview.cpp(viewfinder framebuffer 移 PSRAM)
+
+## 待辦 / 後續
+
+- 長條碼逐字送(每字元 ~16ms)對很長的碼會略慢;目前可接受。
+- INPUT↔其他模式切換時 WiFi reinit 約數秒;若需更快可評估保留 WiFi init 只 stop(但 DRAM 會更緊)。
+- README 的 BLE HID 賣點現已實作;可更新 README 移除「尚未實作」註記。
+
+---
+
+# Session 2026-10-21 (收尾) — Phase C 兩大項完成 + Redmine 記錄 + README 更新
+
+Phase C（接通後端讓功能真的能動）前兩大項完成並實機驗證：
+
+| 項目 | Redmine | 狀態 |
+|------|---------|------|
+| SD 工作日誌（接通 + 2 張故障卡 + 3 bug + 換卡驗證） | #101 | ✔ 實機通過 |
+| BLE HID 無線條碼槍（NimBLE 從零 + 5 關 + 2 crash + 手機驗證） | #102 | ✔ 實機通過 |
+
+## Redmine issues（本次建立）
+
+- #101 http://blog.softsnail.com:2024/issues/101 — Phase C SD 工作日誌
+- #102 http://blog.softsnail.com:2024/issues/102 — Phase C BLE HID
+- 用共用工具 `python3 ~/projects/scripts/redmine.py create --subject ... --tracker 3 --priority 2 --desc-file ...`（自動讀專案 .env：project xq_xscriqf / tracker 3=功能）。Textile 格式完整記錄過程。
+
+## README 更新
+
+- Hardware Wireless 行：BLE「尚未實作」→「NimBLE；單一 radio，INPUT/BLE 模式會暫停 WiFi」。
+- Features：BLE HID 行補「NimBLE、US layout+Enter、按需啟動、BLE 期間暫停 WiFi/MQTT」；工作日誌行改「依模式記錄到 SD 每日 /log_YYYY-MM-DD.json、NTP 時間戳、LOG 頁逐日瀏覽」。
+- Dependencies：ESP32-BLE-Keyboard(T-vK) → NimBLE-Arduino(h2zero，自寫薄層)。
+- Project Structure：network/ 補 ble_hid.h/.cpp。
+- 決策記錄：新增 #101 / #102 兩條。
+
+## Phase C 剩餘（未做）
+
+- WiFi/MQTT/BLE 設定子頁（配網、broker、配對）— 目前設定頁僅唯讀狀態。
+- 音量實際輸出（蜂鳴器非板載）。
+- INPUT 子通道（web-sim 的 BLE/MQTT 切換）；目前 INPUT 固定走 BLE HID。
+- scan-input（MQTT 推送 Web UI）兩端皆未實作。
+- 工作日誌 pending 佇列 WiFi 重連自動 sync（scan_log_sync_pending 已實作，確認呼叫時機）。
+
+---
+
+# Session 2026-10-21 (續) — 設定頁改「開/關」式動作（詳細設定在 web portal）
+
+使用者定案：GUI 設定頁只做開/關這類動作，SSID/密碼/broker 等詳細設定都在 WiFi web 配網頁做。
+
+## 改動
+
+- SETTINGS CONFIRM switch（ui_main.cpp ui_nav_event）：
+  * WiFi 列 → g_wifi_portal_cb()（開 web 配網 portal；value 顯示「配網中...」）。
+  * BLE 列 → toggle ble_hid_begin()/ble_hid_stop() + settings_refresh()（開/關；起 BLE 會暫停 WiFi）。
+  * 亮度 → 套用 display_set_brightness + 移焦點；語言 → 切換；工作日誌 → 進 LOG 頁。
+  * MQTT / 音量 → 唯讀（value 顯示狀態）。
+- 新增 hook ui_set_wifi_portal_cb(ui_wifi_portal_cb_t)（ui_main.h/.cpp）+ g_wifi_portal_cb static。
+  讓 ui_main 不直接相依 main.cpp 的 g_wifi。
+- main.cpp 註冊 ui_set_wifi_portal_cb([](){ g_wifi.startConfigPortal(); })。g_wifi.loop()(loop line 508)
+  服務 portal 請求。
+- settings_refresh 已顯示真實狀態（WiFi 已連線/未連線、MQTT 已連線/未連線、BLE 關閉/等待配對/
+  已連線），符合開關語意。
+
+## 實機驗證通過 ✔
+
+- HOME→設定→BLE 列 CONFIRM：`startAdvertising ok=1 → advertising "SoftSnail"`(開) → 再 CONFIRM
+  `HID keyboard stopped → re-establishing WiFi`(關)。乾淨 toggle 無 crash。
+- WiFi 列 CONFIRM：`[WIFI] opening config portal (from settings)`；startConfigPortal 冪等
+  (已開則 no-op)。開機無 WPA2 AP 時 WiFiManager 本就自動開 portal：
+  `AP started - SSID: SoftSnail-Scanner-Setup, IP: 192.168.4.1`、`Portal started at http://192.168.4.1`。
+
+## build
+
+pio run SUCCESS（RAM/Flash 與 BLE session 同級，~52%/58%）。
+
+## 修改檔案
+
+- src/ui/ui_main.h/.cpp（SETTINGS CONFIRM WiFi 開 portal + BLE toggle、ui_set_wifi_portal_cb hook）
+- src/main.cpp（註冊 wifi portal callback）
+
+---
+
+# Session 2026-10-21 (A) — 查詢鏈端到端實機驗證通過（WiFi D500MA + server）
+
+使用者提供 WPA2 熱點 D500MA + server http://blog.softsnail.com:8040。完整查詢鏈實機跑通。
+
+## 連線確認（開機）
+
+- WiFi：`WiFiManager: Connected! IP: 10.42.0.240`（D500MA，WPA2）。
+- NTP：`[TIME] NTP sync requested (TZ=CST-8)` —— 有 WiFi 時校時正常（1970 疑慮解除）。
+- MQTT：`blog.softsnail.com:1883 Connected`（首次 rc=-2 重試後連上）+ `Subscribed: warehouse/response/esp32-001`。
+
+## server 契約確認（REST /items）
+
+OpenAPI（:8040/openapi.json）：server 已是完整 ERP（items/sales/purchases/quotations/repairs/
+accounting），掃描器相關 HTTP 僅 `/items/{barcode}` CRUD；查詢/入出庫/盤點走 MQTT（非 HTTP）。
+`ItemResponse` schema 欄位 name/spec/quantity/location/supplier/date_in **與韌體 RESULT 頁 6 欄位
+完全對齊**。GET /items/RAC-28VP = {冷氣, 2.8KW, qty 2, supplier 日立, date_in 2026-07-28}。
+
+## 查詢鏈實機（QUERY 模式 inject RAC-28VP）
+
+```
+[SERIAL] inject barcode: RAC-28VP
+[LOG] #8: RAC-28VP                      ← 同步寫 SD 工作日誌
+[MQTT] Query sent: RAC-28VP (ok=1)
+[MQTT] Response: status=found
+[PREVIEW] stopped                       ← 切到 RESULT 頁
+```
+
+RESULT 頁顯示 冷氣/2.8KW/qty=2/日立（CJK 中文字型正常，使用者目視確認）。整條鏈
+（掃描→MQTT 查詢→server 查 DB→warehouse/response→RESULT 頁 6 欄位）運作正確。
+
+→ A 收尾：Phase A 的 RESULT 頁 + Phase C SD 日誌 + P1 查詢鏈，在真實 server 下一次驗證全通。
+
+## 下一步：B（scan-input 推送 Web UI）
+
+server 原始碼在本機 ~/projects/barcode-warehouse-server。現況無 scan-input endpoint、無
+WebSocket；MQTT handler 只訂 query/create/stock/stocktake。B 需 server 加 scan-input 訂閱 +
+WebSocket/SSE 推 /web/items + 前端 JS，韌體加 INPUT 子通道。屬跨專案 + 需部署到 live server。
+
+---
+
+# Session 2026-10-21 (修) — 掃描無 RESULT 頁 → 根因是 BLE 用 esp_wifi_deinit 破壞 WiFi 恢復
+
+使用者回報：首頁→掃描(QUERY)→掃描，沒出現 RESULT 頁。但剛 boot 後第一次查詢是正常的。
+
+## 定位
+
+- 新鮮開機查 RAC-28VP：`Query sent → Response: found → RESULT 頁` 正常。
+- 失敗情境重現：**先在設定頁 toggle 過 BLE** 後，查詢就沒 `Query sent`、沒 RESULT 頁。
+- SD 日誌 dump 確認掃描有記到(tag=QUERY，mode 正確)，但 QUERY 分支因 `!mqtt_is_connected()` 走
+  「MQTT offline」(只寫 LCD label 無 serial)→靜默失敗。
+- BLE 循環後 serial：`[BLE] stopped → re-establishing WiFi → WiFiManager Connecting D500MA →
+  Connection failed (status=255 NO_SHIELD) → 開 config portal`。
+
+## 根因
+
+先前為解 BLE OOM 在 ble_hid_begin 用**原始 esp_wifi_deinit()** 釋放 DRAM。但這**繞過 Arduino WiFi
+類別**，desync 其內部 init 狀態 → BLE stop 後 `WiFi.mode(WIFI_STA)/begin()` 回 status=255
+(NO_SHIELD)，WiFi 永遠連不回來 → MQTT 死 → 查詢靜默失敗 → 無 RESULT 頁。試過在 stop callback
+加 WIFI_OFF→STA 重 toggle 也無效(deinit 後 Arduino 層已 desync)。
+
+## 修法（改用 Arduino 原生 WiFi.mode，不用 raw deinit）
+
+- ble_hid_begin：`esp_wifi_stop()+esp_wifi_deinit()` → 改 **`WiFi.mode(WIFI_OFF)`**。Arduino 類別
+  狀態保持同步，WIFI_OFF 一樣釋放驅動 DRAM，之後 WIFI_STA 能乾淨重 init。
+- stopped callback：`WiFi.mode(WIFI_STA)` + delay + `g_wifi.begin()` + `mqtt_client_init()`。
+- ble_hid.cpp include esp_wifi.h → WiFi.h。
+- memory.md 2026-10-06 曾警告 WIFI_OFF 破壞 netstack，但那是「連線嘗試之間反覆 toggle WIFI_OFF」
+  的情境；BLE 期間一次乾淨 OFF→(BLE)→STA bracket 是標準做法，實測恢復正常。
+
+## 實機驗證（完整 BLE 循環 + 查詢）
+
+```
+BLE ON:  BLE started=1 connected=1 | internal=70428   ← 70KB 餘裕(WIFI_OFF 釋放足夠；
+                                                          無先前 3.5KB OOM/Malloc failed)
+BLE OFF: stopped → re-establishing WiFi
+         WiFiManager: Connected! IP: 10.42.0.240       ← 無 NO_SHIELD，WiFi 恢復
+         [MQTT] Connected!                             ← MQTT 恢復
+查詢:    Query sent: RAC-28VP → Response: status=found → RESULT 頁
+```
+
+→ 「掃描無 RESULT 頁」根因解除。此修法比原 esp_wifi_deinit 更佳：釋放夠 DRAM(BLE 連線下仍
+70KB) 且 WiFi 可恢復。
+
+## build
+
+clean rebuild：RAM 52.6% (172440)、Flash 58.1% (1827637)。
+
+## 修改檔案
+
+- src/network/ble_hid.cpp（esp_wifi_deinit → WiFi.mode(WIFI_OFF)；include esp_wifi.h→WiFi.h）
+- src/main.cpp（stopped callback WiFi.mode(WIFI_STA)+begin）
+
+## A 收尾釐清（2026-10-21）：RESULT 頁 OK，相機 1D 解碼率是另一議題
+
+使用者回報真實相機掃 RAC-28VP「只有 Query ok 停 SCAN」。隔離測試：
+- 真實掃描：`scan: starting multi-frame attempt` 後**無 [DECODE]** → 相機沒解出 1D 條碼。
+- 序列注入 RAC-28VP：`Query sent → found → PREVIEW stopped → RESULT 頁`，使用者確認螢幕顯示正確
+  （冷氣/2.8KW/qty=2/日立，CJK 正常）。
+→ 查詢鏈 + RESULT 頁邏輯**完全正常**；相機掃不出 RAC-28VP(Code128) 是**已知 1D 鏡頭光學限制**
+  （FD5640 定焦/VCM=120，見 Session 2026-09-27/10-03），與 GUI 無關。QR 可穩定掃。
+→ A 正式收尾。驗證 GUI 查詢用序列注入或 QR Code 版條碼即可。
