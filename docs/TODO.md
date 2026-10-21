@@ -172,3 +172,56 @@
 >- [x] OTA 韌體更新
 >- [ ] 錯誤處理與重試機制
 >- [x] 設定值 NVS 持久化
+
+---
+
+## 剩餘未做項目盤點 (2026-10-21)
+
+> 本區塊為當前真實進度盤點。上方各 Phase 的勾選狀態部分已過時——Phase A(GUI 對齊 web-sim)
+> 與 Phase C(接通後端) 這幾天大量完成並實機驗證，詳見 docs/memory.md 與 Redmine #101/#102/#103。
+
+### 已完成並實機驗證（修正上方過時狀態）
+
+- [x] **查詢鏈 + 查詢結果頁** — RESULT 獨立頁 6 欄位(品名/規格/數量/儲位/供應商/入庫日)，接真實
+  MQTT 查詢；實機 RAC-28VP → 顯示冷氣/2.8KW。(對應 Phase 3「查詢結果頁面」)
+- [x] **SD 工作日誌** — 掛載 SD + 每次掃描記錄 + NTP 校時 + LOG 頁逐日瀏覽 + 開機寫入健檢。
+  (對應 Phase 7 全部；Redmine #101)
+- [x] **BLE HID 無線條碼槍** — NimBLE 自寫薄層，按需啟動，狀態列 [B]，手機配對實機驗證。
+  (對應 Phase 5「BLE HID」；Redmine #102)
+- [x] **scan-input → Web UI** — INPUT-MQTT 子通道 publish + server SSE 即時推送到 Web 表單欄位，
+  瀏覽器自動填入實機確認。(對應 Phase 5「MQTT 掃描輸入推送」；Redmine #103)
+- [x] **設定頁** — 可聚焦清單；WiFi 列開 web 配網 portal、BLE 列 toggle、亮度/語言/工作日誌。
+  (對應 Phase 3「設定頁面」)
+- [x] **狀態列 [B] BLE 圖標** — 灰/紅/綠。(補齊 Phase 3「缺 BLE 圖標」)
+- [x] **中文字型** — lv_font_cjk_tc_16 (Big5-L1 subset) 整合。(對應 Phase 4 主體)
+- [x] **LVGL disp/indev 整理** — display.cpp 為單一真相源。(補齊 Phase 2 註記的待整理)
+- [x] **新頁面** — INVENTORY_LIST(盤點清單,接真實資料)、LOG(工作日誌)、ABOUT。
+
+### 仍待辦（依阻礙分類）
+
+**A. 純韌體可做，但需先定 server 契約**
+- [x] **pending 離線佇列自動同步** — 2026-10-21 完成+實機驗證。只離線時的 IN/OUT 進 pending
+  (scan_log_queue_pending)；scan_log_sync_pending 改 per-item replay(IN→stock/in, OUT→stock/out,
+  成功即移除, 失敗保留重試)，取代被拒的 batch no-op。main loop 於 MQTT connect 上升緣觸發。
+  實機: queue IN RAC-28VP → replay → stock_in_ok → REST qty 2→3。
+
+**B. 跨專案 / 需後端新功能**
+- [ ] **scan-input 租戶/裝置過濾** — 目前全廣播(所有登入瀏覽器都收到)。需依 tenant_id/device_id
+  過濾。改 barcode-warehouse-server。
+
+**C. 硬體限制**
+- [ ] **音量實際輸出** — 板上無蜂鳴器(BUZZER_ENABLED=0)。需外接被動蜂鳴器才有意義。
+- [ ] **相機 1D 條碼解碼(EAN-13/Code128)** — 演算法就緒(host 24/24)，但 FD5640 定焦鏡頭 MTF
+  光學極限，實機解不出。解法:換 AF 鏡頭模組 或 加專用 1D 解碼晶片(M5Stack Unit QRCode/GM65 UART)。
+  QR Code 則穩定可用。
+- [ ] **觸控** — CST816 硬體不通(晶片/FPC 故障)，驅動碼保留，修好硬體即可用。暫以 BOOT 單鍵。
+
+**D. 待實機補驗（非未做）**
+- [x] **P3 盤點完整 server session 鏈** — 2026-10-21 實機驗證通過(D500MA+live server)：start→
+  session_id=11(ST-20261021-004)→掃 RAC-28VP×2 得 sys=2 act=1 d=-1 / act=2 d=0(差異計算正確)→
+  end 關閉；庫存未被改動(REST qty 仍 2，盤點只記差異不碰庫存)。
+- [ ] **拍照辨識頁** — Phase 8 HTTP 上傳已有；UI 頁面互動(拍照/上傳按鈕)對齊 web-sim 尚未納入。
+- [ ] **虛擬鍵盤** — 設定用英數輸入(目前詳細設定走 web portal，優先度低)。
+
+### 未納入範圍 / 低優先
+- [ ] 1D 單次掃描模式、LVGL Group 焦點管理、i18n 完整切換(目前語言切換僅設定頁顯示)。

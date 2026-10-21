@@ -463,6 +463,14 @@ void loop() {
                 // Dump today's work log from SD (diagnostic).
                 String js = scan_log_read(nullptr, 0, 100);
                 Serial.printf("[SERIAL] today's log: %s\n", js.c_str());
+            } else if (s_len == 0 && c == 'q') {
+                // Test: queue an offline pending IN scan (RAC-28VP), then run
+                // the replay immediately — verifies the offline-queue → replay
+                // path (IN → warehouse/stock/in) without having to drop WiFi.
+                Serial.println("[SERIAL] queue pending IN RAC-28VP + sync now");
+                scan_log_queue_pending("IN", "RAC-28VP");
+                uint32_t n = scan_log_sync_pending();
+                Serial.printf("[SERIAL] replayed %u pending\n", (unsigned)n);
             } else {
                 // Accumulate into the line buffer (barcode or multi-digit VCM).
                 if (s_len < sizeof(s_line) - 1) {
@@ -511,6 +519,19 @@ void loop() {
     // ── Network keep-alive ──────────────────────────────────────────────────
     g_wifi.loop();        // captive portal requests + connection state machine
     mqtt_client_loop();   // MQTT keep-alive + auto-reconnect (internally rate-limited)
+
+    // Replay offline pending IN/OUT scans on the rising edge of MQTT connect
+    // (covers both first connect and reconnect-after-drop). sync is a no-op if
+    // the pending queue is empty.
+    {
+        static bool s_mqtt_was_connected = false;
+        bool now_conn = mqtt_is_connected();
+        if (now_conn && !s_mqtt_was_connected) {
+            uint32_t n = scan_log_sync_pending();
+            if (n) Serial.printf("[MAIN] replayed %u offline scan(s) on MQTT connect\n", n);
+        }
+        s_mqtt_was_connected = now_conn;
+    }
 
     // Refresh the status-bar icons periodically (every 3 s).
     {

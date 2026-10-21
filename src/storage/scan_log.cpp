@@ -5,6 +5,7 @@
 
 #include "scan_log.h"
 #include <SD.h>
+#include <ArduinoJson.h>
 #include "sd_card.h"
 #include "config/config.h"
 #include "network/mqtt_client.h"
@@ -77,8 +78,10 @@ void scan_log_init(void) {
 // ─── Public: log add ──────────────────────────────────────────────────────────
 
 // Common writer: build a JSON line {ts,type,content} and append to today's log
-// file plus the pending/ sync queue. Shared by scan_log_add (DecodeResult) and
-// scan_log_add_entry (plain strings).
+// file. Shared by scan_log_add (DecodeResult) and scan_log_add_entry (strings).
+// NOTE: this writes the work-log only. The offline sync queue is written
+// SEPARATELY via scan_log_queue_pending() — and only for state-changing IN/OUT
+// scans done while offline — so we don't try to replay queries/inputs later.
 static void scan_log_write(const char* type, const char* content) {
     if (!sd_card_is_mounted()) return;
     if (!content || !content[0]) return;
@@ -105,11 +108,6 @@ static void scan_log_write(const char* type, const char* content) {
         _total_count++;
         Serial.printf("[LOG] #%u: %s\n", _total_count, content);
     }
-
-    // Also add to pending queue for sync
-    pending_file_path(path, sizeof(path));
-    sd_card_write_file(path, json);
-    _pending_count++;
 }
 
 void scan_log_add(const DecodeResult& result) {
@@ -119,6 +117,22 @@ void scan_log_add(const DecodeResult& result) {
 
 void scan_log_add_entry(const char* type, const char* content) {
     scan_log_write(type, content);
+}
+
+// Queue an offline IN/OUT scan for later replay. Writes {type,content} to the
+// pending file. Only call when offline at scan time.
+void scan_log_queue_pending(const char* type, const char* content) {
+    if (!sd_card_is_mounted() || !content || !content[0]) return;
+    char json[256];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"%s\",\"content\":\"%s\"}\n", type ? type : "", content);
+    char path[64];
+    pending_file_path(path, sizeof(path));
+    if (sd_card_write_file(path, json)) {
+        _pending_count++;
+        Serial.printf("[LOG] queued pending (%s %s), total=%u\n",
+                      type, content, _pending_count);
+    }
 }
 
 // ─── Public: log read ─────────────────────────────────────────────────────────
@@ -259,28 +273,62 @@ void scan_log_clear(void) {
 // ─── Public: sync pending ─────────────────────────────────────────────────────
 
 uint32_t scan_log_sync_pending(void) {
-    uint32_t count = scan_log_pending_count();
-    if (count == 0) return 0;
-
+    if (!sd_card_is_mounted()) return 0;
     if (!mqtt_is_connected()) {
         Serial.println("[LOG] MQTT not connected, cannot sync pending");
         return 0;
     }
 
-    Serial.printf("[LOG] Syncing %u pending items...\n", count);
+    char path[64];
+    pending_file_path(path, sizeof(path));
+    String content = sd_card_read_file(path);
+    if (content.length() == 0) return 0;
 
-    // Use mqtt batch publish which reads pending entries and publishes them
-    uint16_t published = mqtt_publish_inventory_batch();
+    Serial.println("[LOG] syncing pending offline scans...");
 
-    // After publish, clear the pending queue (items are now on server)
-    // Rewrite the pending file to empty
-    if (published > 0) {
-        char path[64];
-        pending_file_path(path, sizeof(path));
-        SD.remove(path);
-        _pending_count = 0;
-        Serial.printf("[LOG] Pending queue cleared after sync (%u items)\n", published);
+    // Replay each queued line to its per-item topic (IN → stock/in, OUT →
+    // stock/out). Lines that publish OK are dropped; any that fail to publish
+    // are kept in the rewritten file for the next retry. This replaces the old
+    // batch no-op that the server rejected.
+    String kept = "";
+    uint32_t sent = 0, keptCount = 0;
+    int start = 0;
+    for (int i = 0; i <= (int)content.length(); i++) {
+        if (i == (int)content.length() || content[i] == '\n') {
+            if (i > start) {
+                String line = content.substring(start, i);
+                StaticJsonDocument<256> doc;
+                bool ok = false;
+                if (deserializeJson(doc, line) == DeserializationError::Ok) {
+                    const char* type    = doc["type"]    | "";
+                    const char* barcode = doc["content"] | "";
+                    if (barcode[0]) {
+                        if (strcmp(type, "IN") == 0) {
+                            mqtt_stock_in(barcode, 1);  ok = true;
+                        } else if (strcmp(type, "OUT") == 0) {
+                            mqtt_stock_out(barcode, 1); ok = true;
+                        } else {
+                            ok = true;  // unknown/legacy type → drop (not replayable)
+                        }
+                    }
+                }
+                if (ok) {
+                    sent++;
+                } else {
+                    kept += line; kept += "\n"; keptCount++;
+                }
+            }
+            start = i + 1;
+        }
     }
 
-    return published;
+    // Rewrite the pending file with only the lines we could not send.
+    SD.remove(path);
+    if (kept.length() > 0) {
+        File f = SD.open(path, FILE_WRITE);
+        if (f) { f.print(kept); f.flush(); f.close(); }
+    }
+    _pending_count = keptCount;
+    Serial.printf("[LOG] pending sync: replayed=%u kept=%u\n", sent, keptCount);
+    return sent;
 }

@@ -20,18 +20,28 @@ void scan_log_init(void);
 
 /**
  * @brief Log a scan result to today's log file.
- *        Also adds to pending/ queue for sync.
  * @param result Decode result to log
  */
 void scan_log_add(const DecodeResult& result);
 
 /**
  * @brief Log a scan event from plain strings (UI layer, no decoder dependency).
- *        Writes the same JSON line as scan_log_add() to today's log + pending.
- * @param type    Short type/action tag (e.g. "QUERY", "QR", "IN").
+ *        Writes a JSON line to today's work-log file only (NOT the offline
+ *        pending queue — see scan_log_queue_pending for that).
+ * @param type    Short type/action tag (e.g. "QUERY", "IN", "OUT").
  * @param content Scanned barcode/content string.
  */
 void scan_log_add_entry(const char* type, const char* content);
+
+/**
+ * @brief Queue a scan into the offline pending queue for later replay when the
+ *        connection returns. Only state-changing operations that must not be
+ *        lost belong here (stock IN/OUT). Called when the device is offline at
+ *        scan time; online scans go straight to the server and are NOT queued.
+ * @param type    "IN" or "OUT"
+ * @param content Barcode
+ */
+void scan_log_queue_pending(const char* type, const char* content);
 
 /**
  * @brief Get total number of logged scans (all files).

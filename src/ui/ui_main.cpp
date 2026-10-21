@@ -1558,19 +1558,26 @@ void ui_on_scan(const char* type_name, const char* content) {
             break;
 
         case SCAN_MODE_STOCK_IN:
-            // Stock-in: each scan adds one unit (server increments quantity).
-            if (g_scan_lbl_info) {
-                lv_label_set_text(g_scan_lbl_info, "Stock-in...");
+            // Stock-in: +1 unit. Online → publish now; offline → queue to the
+            // pending file for replay when the connection returns.
+            if (mqtt_is_connected()) {
+                mqtt_stock_in(content, 1);
+                if (g_scan_lbl_info) lv_label_set_text(g_scan_lbl_info, "進貨 +1");
+            } else {
+                scan_log_queue_pending("IN", content);
+                if (g_scan_lbl_info) lv_label_set_text(g_scan_lbl_info, "離線：進貨已暫存");
             }
-            mqtt_stock_in(content, 1);
             break;
 
         case SCAN_MODE_STOCK_OUT:
-            // Stock-out: each scan removes one unit.
-            if (g_scan_lbl_info) {
-                lv_label_set_text(g_scan_lbl_info, "Stock-out...");
+            // Stock-out: -1 unit. Online → publish now; offline → queue.
+            if (mqtt_is_connected()) {
+                mqtt_stock_out(content, 1);
+                if (g_scan_lbl_info) lv_label_set_text(g_scan_lbl_info, "出貨 -1");
+            } else {
+                scan_log_queue_pending("OUT", content);
+                if (g_scan_lbl_info) lv_label_set_text(g_scan_lbl_info, "離線：出貨已暫存");
             }
-            mqtt_stock_out(content, 1);
             break;
 
         case SCAN_MODE_STOCKTAKE: {

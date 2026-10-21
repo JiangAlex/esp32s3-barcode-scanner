@@ -1635,3 +1635,96 @@ topic `warehouse/scan-input/{device_id}`，payload `{device_id, barcode, type?, 
 - 完整端到端(真機掃→live server→瀏覽器 item 表單欄位自動填)需 server git pull 部署到
   blog.softsnail.com:8040 後，開 /web/items/new 實測。
 - 全廣播；租戶/裝置過濾為後續。
+
+---
+
+# Session 2026-10-21 (B 收尾) — INPUT-MQTT 切換後 MQTT 重連慢的體驗修復 + scan-input live 驗證
+
+## 問題
+
+切到 INPUT-MQTT 後 MQTT 要 ~15-20s 才重連好，期間掃描靜默落入「MQTT offline」。根因鏈：
+INPUT-BLE→INPUT-MQTT 時 ble_hid_stop → stopped_cb 做 WiFi.mode(WIFI_STA)+g_wifi.begin()(非同步)
++mqtt_client_init()；當下 WiFi 還沒 associate 完，MQTT 連不上，要等 mqtt_client_loop 的 5s 重試
+週期、且可能多輪 → 15-20s。
+
+## 修復
+
+- mqtt_client_loop：重試 5s→1.5s，且只在 wifi_is_connected() 時才 mqtt_reconnect（不浪費嘗試在
+  WiFi 還沒好的時候）。post-handoff MQTT 恢復從 ~15-20s 降到 WiFi 好後 ~1-2s。
+- ui_on_scan INPUT_MQTT 分支：區分「WiFi 連線中/MQTT 連線中(transient,請稍候再掃)」vs 真 offline；
+  成功/失敗訊息中文(已推送至 Web UI / 推送失敗)。
+- g_scan_lbl_info 字型 montserrat_12 → lv_font_cjk_tc_16(含 ASCII，中文回饋才顯示得出；既有英文
+  hint 照常)。預設 hint 改「短按:掃描 長按:換模式」。
+
+## 實機驗證（live broker）
+
+切 INPUT-BLE(startAdvertising)→INPUT-MQTT(stopped→re-establishing WiFi→[MQTT] Connected! 快速)
+→ inject WEB-UI-TEST-999 → [MQTT] scan-input ok=1；mosquitto_sub blog.softsnail.com 收到
+{"device_id":"esp32-001","barcode":"WEB-UI-TEST-999","type":"SERIAL","ts":44}。重連在等待窗內完成，
+不再 15-20s 卡住。
+
+## deployed server 驗證
+
+使用者 git pull 部署後：live /web/scan-stream 存在(302 需登入，非 404)。登入 live + 開 SSE +
+mosquitto_pub 到 live broker → live SSE 收到 {"barcode":"DEPLOY-CHECK-777",...}。
+→ deployed server relay(broker→server→SSE) 實測通過。
+
+## scan-input 完整鏈路狀態（全部驗證）
+
+韌體→broker(實機 mosquitto_sub 收到) + broker→deployed server→SSE(live 實測) + SSE→瀏覽器填欄位
+(item_form.html EventSource) 三段皆通。真機掃→瀏覽器自動填 = 以上三段串接，各段已證實。
+
+## build / commit
+
+RAM 52.6% / Flash 58.1%。firmware commit 6148a7a (push origin main)。
+
+## ✅ scan-input 完整端到端成功（2026-10-21 瀏覽器確認）
+
+pub DEMO-12345 到 live broker → deployed server SSE 推送 → 使用者瀏覽器 /web/items/new 條碼欄位
+**自動填入 DEMO-12345**（使用者目視確認）。整條鏈路（MQTT→server→SSE→瀏覽器欄位）打通。
+Phase C scan-input (#103) 完成。無線條碼槍打字到 Web 表單效果透過 MQTT+SSE 達成。
+
+---
+
+# Session 2026-10-21 (P3 驗) — 盤點完整 server session 鏈實機驗證通過
+
+真機(D500MA+live server) 跑完整盤點 start→scan→end：
+- start → stocktake_started session_id=11 session_no=ST-20261021-004(server 建 StocktakeSession)
+- scan RAC-28VP ×2 → stocktake_scanned：sys=2 act=1 d=-1；sys=2 act=2 d=0
+  (server 用 DB system_qty=2 算 difference=actual-system，累計正確)
+- end → stocktake_ended session 11 關閉
+- REST /items/RAC-28VP qty 仍=2、updated_at 未變 → 盤點只記差異、不改庫存(符合語意) ✅
+盤點走 MQTT(無 REST endpoint)，以 MQTT 回應含正確 system_qty/difference 為 DB 寫入實證。
+
+---
+
+# Session 2026-10-21 (pending) — 離線暫存自動同步修復(只 IN/OUT, per-item replay)
+
+README 宣稱「WiFi 斷線暫存 SD、恢復連線自動同步」原本壞掉(mqtt_publish_inventory_batch 是 server
+拒絕的 no-op)。本輪修好。
+
+## 設計(照使用者確認的建議)
+
+只有狀態變更的 IN/OUT 需離線重放;QUERY/INPUT/COUNT 不納入(語意不適合:查詢過期無意義、INPUT
+即時性、COUNT 需 server session_id 離線無法對應)。
+
+## 改動
+
+- scan_log_write 不再寫 pending(只寫當日工作日誌)。新增 scan_log_queue_pending(type,content)
+  寫 pending({type,content})，只在離線 IN/OUT 時呼叫。修掉「每次掃描都寫 pending」瑕疵。
+- scan_log_sync_pending 改 per-item replay:逐行 ArduinoJson 解析，IN→mqtt_stock_in、
+  OUT→mqtt_stock_out，成功的 drop、失敗的 kept 重寫回檔(下次重試)。不再用 batch no-op。
+- ui_on_scan STOCK_IN/OUT:mqtt_is_connected() 線上直送、離線 scan_log_queue_pending + UI 提示
+  「離線:進貨/出貨已暫存」。
+- main loop:MQTT connect 上升緣(was→now)觸發 scan_log_sync_pending(涵蓋首連+重連)。
+- serial 測試指令 q:queue IN RAC-28VP + 立即 sync。
+
+## 實機驗證
+
+baseline qty=2 → serial q → [MQTT] warehouse/stock/in: RAC-28VP x1 →
+[LOG] pending sync: replayed=1 kept=0 → server stock_in_ok quantity=3 → REST qty 2→3。✅
+離線暫存→恢復連線自動同步鏈路修復完成。
+
+## build
+
+pio run SUCCESS (RAM ~52.6% / Flash ~58%)。
