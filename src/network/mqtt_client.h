@@ -76,6 +76,19 @@ void mqtt_stock_in(const char* barcode, int quantity);
  */
 void mqtt_stock_out(const char* barcode, int quantity);
 
+// ─── Scan-input (INPUT mode, MQTT sub-channel) ──────────────────────────────
+/**
+ * @brief Publish a scanned barcode to the server for live relay to the Web UI.
+ *        Server contract: warehouse/scan-input/{device_id}
+ *        {device_id, barcode, type?, ts?}. The server pushes it to any Web UI
+ *        browser via SSE (no DB write, no response). Used by the INPUT mode's
+ *        MQTT sub-channel (vs the BLE HID sub-channel).
+ * @param barcode Scanned barcode/content
+ * @param type    Optional type tag (e.g. "QR", "CODE128"); may be nullptr
+ * @return true if published (MQTT connected), false otherwise.
+ */
+bool mqtt_scan_input(const char* barcode, const char* type);
+
 // ─── Stocktake session state machine (P3) ──────────────────────────────────
 /**
  * @brief Begin a stocktake session on the server.

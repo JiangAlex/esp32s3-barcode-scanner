@@ -150,6 +150,28 @@ void mqtt_stock_out(const char* barcode, int quantity) {
     publish_stock(MQTT_TOPIC_STOCK_OUT, barcode, quantity);
 }
 
+// ─── Scan-input (INPUT mode, MQTT sub-channel) ──────────────────────────────
+
+bool mqtt_scan_input(const char* barcode, const char* type) {
+    if (!mqtt.connected()) {
+        Serial.println("[MQTT] Not connected, cannot send scan-input");
+        return false;
+    }
+    if (!barcode || !barcode[0]) return false;
+
+    JsonDocument doc;
+    doc["device_id"] = DEVICE_ID;
+    doc["barcode"]   = barcode;
+    if (type && type[0]) doc["type"] = type;
+    doc["ts"] = (uint32_t)(millis() / 1000);
+
+    char buffer[256];
+    serializeJson(doc, buffer, sizeof(buffer));
+    bool ok = mqtt.publish(MQTT_TOPIC_SCAN_INPUT, buffer);
+    Serial.printf("[MQTT] scan-input: %s (ok=%d)\n", barcode, ok);
+    return ok;
+}
+
 // ─── Stocktake session state machine (P3) ──────────────────────────────────
 
 void mqtt_stocktake_start(void) {

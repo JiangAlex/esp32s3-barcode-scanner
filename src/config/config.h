@@ -45,6 +45,7 @@
 #define MQTT_TOPIC_STOCKTAKE_START "warehouse/stocktake/start"
 #define MQTT_TOPIC_STOCKTAKE_SCAN  "warehouse/stocktake/scan"
 #define MQTT_TOPIC_STOCKTAKE_END   "warehouse/stocktake/end"
+#define MQTT_TOPIC_SCAN_INPUT      "warehouse/scan-input/" DEVICE_ID
 #define MQTT_TOPIC_RESPONSE "warehouse/response/" DEVICE_ID
 
 // ─── Display Settings (ST7789T3, shared SPI bus with SD) ────────────────────

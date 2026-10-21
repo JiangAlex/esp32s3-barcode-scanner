@@ -32,7 +32,8 @@ typedef enum {
 
 typedef enum {
     SCAN_MODE_QUERY = 0,   // scan → MQTT query → show result
-    SCAN_MODE_INPUT,        // scan → BLE HID keyboard output
+    SCAN_MODE_INPUT_BLE,    // scan → BLE HID keyboard output (wireless gun)
+    SCAN_MODE_INPUT_MQTT,   // scan → MQTT scan-input → Web UI field (SSE relay)
     SCAN_MODE_STOCK_IN,     // scan → MQTT stock-in (warehouse/stock/in)
     SCAN_MODE_STOCK_OUT,    // scan → MQTT stock-out (warehouse/stock/out)
     SCAN_MODE_STOCKTAKE,    // scan → stocktake session scan (actual_qty count)

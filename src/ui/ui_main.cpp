@@ -450,9 +450,10 @@ static void show_page(ui_page_t page) {
                     && !g_st_pending_start) {
                 ui_stocktake_begin();
             }
-            // Entering SCAN already in INPUT mode (e.g. came back after leaving):
-            // bring the BLE HID keyboard back up.
-            if (g_scan_mode == SCAN_MODE_INPUT && !ble_hid_is_started()) {
+            // Entering SCAN already in INPUT-BLE mode (e.g. came back after
+            // leaving): bring the BLE HID keyboard back up. INPUT-MQTT keeps
+            // WiFi and needs no BLE.
+            if (g_scan_mode == SCAN_MODE_INPUT_BLE && !ble_hid_is_started()) {
                 ble_hid_begin();
             }
             // Animate slide-in
@@ -1300,11 +1301,12 @@ scan_mode_t ui_get_scan_mode(void) {
 void ui_cycle_scan_mode(void) {
     g_scan_mode = (scan_mode_t)((g_scan_mode + 1) % SCAN_MODE_COUNT);
     const char* mode_names[SCAN_MODE_COUNT] = {
-        [SCAN_MODE_QUERY]     = "[QUERY]",
-        [SCAN_MODE_INPUT]     = "[INPUT]",
-        [SCAN_MODE_STOCK_IN]  = "[IN]",
-        [SCAN_MODE_STOCK_OUT] = "[OUT]",
-        [SCAN_MODE_STOCKTAKE] = "[COUNT]"
+        [SCAN_MODE_QUERY]      = "[QUERY]",
+        [SCAN_MODE_INPUT_BLE]  = "[INPUT-BLE]",
+        [SCAN_MODE_INPUT_MQTT] = "[INPUT-MQTT]",
+        [SCAN_MODE_STOCK_IN]   = "[IN]",
+        [SCAN_MODE_STOCK_OUT]  = "[OUT]",
+        [SCAN_MODE_STOCKTAKE]  = "[COUNT]"
     };
     if (g_scan_lbl_mode) {
         lv_label_set_text(g_scan_lbl_mode, mode_names[g_scan_mode]);
@@ -1316,11 +1318,12 @@ void ui_cycle_scan_mode(void) {
         ui_stocktake_begin();
     }
 
-    // On-demand BLE HID: start the keyboard stack when INPUT (wireless barcode
-    // gun) mode is selected, stop it otherwise. ble_hid_begin() pauses WiFi for
-    // the single-radio coexistence, so WiFi/MQTT are unavailable while in INPUT
-    // mode — acceptable for a barcode-gun that types to a paired host.
-    if (g_scan_mode == SCAN_MODE_INPUT) {
+    // On-demand BLE HID + WiFi/BLE mutual exclusion (single radio):
+    //   INPUT-BLE  → start BLE (ble_hid_begin pauses WiFi) — wireless gun to host.
+    //   INPUT-MQTT → NO BLE; keep WiFi up so mqtt_scan_input can publish to the
+    //                server (which relays to the Web UI via SSE).
+    //   any other  → stop BLE (restores WiFi).
+    if (g_scan_mode == SCAN_MODE_INPUT_BLE) {
         if (!ble_hid_is_started()) {
             if (g_scan_lbl_info) lv_label_set_text(g_scan_lbl_info, "BLE: starting...");
             ble_hid_begin();
@@ -1480,11 +1483,12 @@ void ui_on_scan(const char* type_name, const char* content) {
     // write (shared FSPI bus) is serialized with display access. No-op if the
     // SD card is not mounted.
     static const char* const mode_tags[SCAN_MODE_COUNT] = {
-        [SCAN_MODE_QUERY]     = "QUERY",
-        [SCAN_MODE_INPUT]     = "INPUT",
-        [SCAN_MODE_STOCK_IN]  = "IN",
-        [SCAN_MODE_STOCK_OUT] = "OUT",
-        [SCAN_MODE_STOCKTAKE] = "COUNT",
+        [SCAN_MODE_QUERY]      = "QUERY",
+        [SCAN_MODE_INPUT_BLE]  = "INPUT-BLE",
+        [SCAN_MODE_INPUT_MQTT] = "INPUT-MQTT",
+        [SCAN_MODE_STOCK_IN]   = "IN",
+        [SCAN_MODE_STOCK_OUT]  = "OUT",
+        [SCAN_MODE_STOCKTAKE]  = "COUNT",
     };
     scan_log_add_entry(mode_tags[g_scan_mode], content);
 
@@ -1512,10 +1516,10 @@ void ui_on_scan(const char* type_name, const char* content) {
             }
             break;
 
-        case SCAN_MODE_INPUT:
-            // Input mode = wireless barcode gun: type the scanned value at the
-            // paired host's cursor via BLE HID. BLE is started on entering this
-            // mode (see ui_cycle_scan_mode / show_page), with WiFi paused.
+        case SCAN_MODE_INPUT_BLE:
+            // Wireless barcode gun: type the scanned value at the paired host's
+            // cursor via BLE HID. BLE is started on entering this mode (see
+            // ui_cycle_scan_mode / show_page), with WiFi paused.
             if (!ble_hid_is_connected()) {
                 if (g_scan_lbl_info) {
                     lv_label_set_text(g_scan_lbl_info,
@@ -1527,6 +1531,25 @@ void ui_on_scan(const char* type_name, const char* content) {
             ble_hid_type_line(content);
             if (g_scan_lbl_info) {
                 lv_label_set_text(g_scan_lbl_info, "Sent via BLE keyboard");
+            }
+            break;
+
+        case SCAN_MODE_INPUT_MQTT:
+            // Push the scanned value to the server, which relays it to the Web
+            // UI form field via SSE. Needs WiFi/MQTT up (this mode does NOT
+            // start BLE, so WiFi stays connected).
+            if (!mqtt_is_connected()) {
+                if (g_scan_lbl_info) {
+                    lv_label_set_text(g_scan_lbl_info, "MQTT offline — not sent");
+                }
+                break;
+            }
+            if (mqtt_scan_input(content, type_name)) {
+                if (g_scan_lbl_info) {
+                    lv_label_set_text(g_scan_lbl_info, "Pushed to Web UI");
+                }
+            } else if (g_scan_lbl_info) {
+                lv_label_set_text(g_scan_lbl_info, "Push failed");
             }
             break;
 
