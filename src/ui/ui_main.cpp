@@ -634,9 +634,9 @@ static void create_scan_page(void) {
 
     // Info line
     g_scan_lbl_info = lv_label_create(g_page_scan);
-    lv_label_set_text(g_scan_lbl_info, "Short: mode  Long: confirm");
+    lv_label_set_text(g_scan_lbl_info, "短按:掃描  長按:換模式");
     lv_obj_set_style_text_color(g_scan_lbl_info, (lv_color_t){ .full = 0x8410 }, 0); // dim grey
-    lv_obj_set_style_text_font(g_scan_lbl_info, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(g_scan_lbl_info, &lv_font_cjk_tc_16, 0);  // CJK (incl ASCII)
     lv_obj_align(g_scan_lbl_info, LV_ALIGN_TOP_MID, 0, 95);
 
     // Stocktake feedback line — BELOW the viewfinder (screen y>=235, i.e. page
@@ -1537,19 +1537,23 @@ void ui_on_scan(const char* type_name, const char* content) {
         case SCAN_MODE_INPUT_MQTT:
             // Push the scanned value to the server, which relays it to the Web
             // UI form field via SSE. Needs WiFi/MQTT up (this mode does NOT
-            // start BLE, so WiFi stays connected).
+            // start BLE, so WiFi stays connected). Right after switching here
+            // from INPUT-BLE, WiFi/MQTT are still re-connecting for ~1-2 s —
+            // tell the user to wait rather than a bare "offline".
             if (!mqtt_is_connected()) {
                 if (g_scan_lbl_info) {
-                    lv_label_set_text(g_scan_lbl_info, "MQTT offline — not sent");
+                    lv_label_set_text(g_scan_lbl_info,
+                        wifi_is_connected() ? "MQTT 連線中，請稍候再掃"
+                                            : "WiFi 連線中，請稍候再掃");
                 }
                 break;
             }
             if (mqtt_scan_input(content, type_name)) {
                 if (g_scan_lbl_info) {
-                    lv_label_set_text(g_scan_lbl_info, "Pushed to Web UI");
+                    lv_label_set_text(g_scan_lbl_info, "已推送至 Web UI");
                 }
             } else if (g_scan_lbl_info) {
-                lv_label_set_text(g_scan_lbl_info, "Push failed");
+                lv_label_set_text(g_scan_lbl_info, "推送失敗");
             }
             break;
 

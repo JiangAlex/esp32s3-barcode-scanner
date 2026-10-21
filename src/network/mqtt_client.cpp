@@ -64,8 +64,13 @@ void mqtt_client_init(void) {
 
 void mqtt_client_loop(void) {
     if (!mqtt.connected()) {
+        // Retry quickly (1.5 s) but only once WiFi is actually up — avoids
+        // burning a reconnect attempt while the WiFi driver is still
+        // associating (e.g. right after the INPUT-BLE → INPUT-MQTT handoff,
+        // where BLE released WiFi and it is re-connecting). This cuts the
+        // post-handoff MQTT recovery from ~15-20 s down to ~1-2 s after WiFi.
         static unsigned long last_attempt = 0;
-        if (millis() - last_attempt > 5000) {  // Retry every 5 seconds
+        if (wifi_is_connected() && millis() - last_attempt > 1500) {
             last_attempt = millis();
             mqtt_reconnect();
         }
