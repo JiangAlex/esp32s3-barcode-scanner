@@ -1728,3 +1728,15 @@ baseline qty=2 → serial q → [MQTT] warehouse/stock/in: RAC-28VP x1 →
 ## build
 
 pio run SUCCESS (RAM ~52.6% / Flash ~58%)。
+
+---
+
+# Session 2026-10-21 (device filter) — scan-input 裝置編號過濾 (server-only)
+
+scan-input 原全廣播。加 device_id 過濾(採裝置編號方案 a，不改 DB；完整 tenant 過濾為後續)。
+- barcode-warehouse-server(commit e860e9e): scan_broadcaster._subscribers 改 dict{queue:device_id}，
+  subscribe(device_id=None)，_fanout 只推 device_id 相符或未指定(None=全收)的 queue。
+  /web/scan-stream 接 ?device_id= query param。item_form.html 預設全收(註解說明 opt-in)。
+- 本機驗證: curl SSE ?device_id=esp32-001 + mosquitto_pub esp32-001/esp32-002 → 只收 esp32-001;
+  單元測試 q_all=[A,B] q_001=[A] q_002=[B]。
+- 韌體無改動(payload 已含 device_id)。server 由使用者 git pull 部署。

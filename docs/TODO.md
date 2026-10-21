@@ -206,8 +206,10 @@
   實機: queue IN RAC-28VP → replay → stock_in_ok → REST qty 2→3。
 
 **B. 跨專案 / 需後端新功能**
-- [ ] **scan-input 租戶/裝置過濾** — 目前全廣播(所有登入瀏覽器都收到)。需依 tenant_id/device_id
-  過濾。改 barcode-warehouse-server。
+- [x] **scan-input 裝置編號過濾** — 2026-10-21 完成(server barcode-warehouse-server commit
+  e860e9e)。/web/scan-stream?device_id=esp32-001 過濾到單一掃描器;broadcaster subscribers 帶
+  device_id filter，_fanout 只推相符(或未指定=全收)。本機 curl+雙 device mosquitto_pub 驗證。
+  完整 tenant 過濾(需 device→tenant 映射)仍為後續。
 
 **C. 硬體限制**
 - [ ] **音量實際輸出** — 板上無蜂鳴器(BUZZER_ENABLED=0)。需外接被動蜂鳴器才有意義。
