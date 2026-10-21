@@ -1596,3 +1596,42 @@ clean rebuild：RAM 52.6% (172440)、Flash 58.1% (1827637)。
 → 查詢鏈 + RESULT 頁邏輯**完全正常**；相機掃不出 RAC-28VP(Code128) 是**已知 1D 鏡頭光學限制**
   （FD5640 定焦/VCM=120，見 Session 2026-09-27/10-03），與 GUI 無關。QR 可穩定掃。
 → A 正式收尾。驗證 GUI 查詢用序列注入或 QR Code 版條碼即可。
+
+---
+
+# Session 2026-10-21 (B) — scan-input: 掃描值即時推送 Web UI (跨專案 + SSE)
+
+Phase C B：INPUT 模式(MQTT 子通道)掃描值即時填入倉管 Web UI 表單欄位。跨兩專案(韌體 + server)。
+採 SSE。server 本機端到端驗證 + 韌體實機 publish 驗證(live broker)皆通過;唯「真機→live server→
+瀏覽器」完整端到端待使用者 git pull 部署 server。
+
+## 契約
+
+topic `warehouse/scan-input/{device_id}`，payload `{device_id, barcode, type?, ts?}`。全廣播。
+
+## server (barcode-warehouse-server, commit 4350505)
+
+- scan_broadcaster.py: asyncio.Queue fan-out + loop.call_soon_threadsafe(paho thread→event loop
+  唯一安全橋)，bounded queue(maxsize 20)防慢 client。
+- main.py lifespan: mqtt.start 前 scan_broadcaster.set_loop(get_running_loop())。
+- mqtt_handler: subscribe warehouse/scan-input/+ ; _handle_scan_input → broadcaster.publish(不碰 DB)。
+- web.py: GET /web/scan-stream SSE(需登入;心跳 ": ping" 15s;X-Accel-Buffering no;finally unsubscribe)。
+- item_form.html: EventSource('/web/scan-stream')→填 #barcode+input event+綠閃+focus。
+- 本機驗證(SQLite + test.mosquitto.org): curl -N SSE + mosquitto_pub 2 筆 → SSE 正確收到。
+
+## 韌體 (commit 61a3dbe)
+
+- config.h MQTT_TOPIC_SCAN_INPUT；mqtt_client mqtt_scan_input(barcode,type)。
+- scan_mode_t SCAN_MODE_INPUT 拆 INPUT_BLE / INPUT_MQTT(長按循環 [INPUT-BLE]/[INPUT-MQTT])。
+- 互斥(單一 radio)：INPUT-BLE 起 BLE(關 WiFi)；INPUT-MQTT 不起 BLE、保留 WiFi/MQTT。
+  ui_cycle_scan_mode + show_page SCAN 連動。ui_on_scan 依子通道 ble_hid_type_line / mqtt_scan_input。
+- 實機驗證: 燒錄 → QUERY→INPUT-BLE(BLE 起/WiFi 關)→INPUT-MQTT(BLE 停→WiFi 恢復→MQTT Connected)
+  → inject SCAN-INPUT-TEST → [MQTT] scan-input ok=1；mosquitto_sub blog.softsnail.com 收到
+  {"device_id":"esp32-001","barcode":"SCAN-INPUT-TEST","type":"SERIAL","ts":37}。
+  順帶再次驗證 INPUT-BLE↔INPUT-MQTT 的 WiFi/BLE 交接恢復正常(無 NO_SHIELD 回歸)。
+
+## 待辦 / 後續
+
+- 完整端到端(真機掃→live server→瀏覽器 item 表單欄位自動填)需 server git pull 部署到
+  blog.softsnail.com:8040 後，開 /web/items/new 實測。
+- 全廣播；租戶/裝置過濾為後續。
