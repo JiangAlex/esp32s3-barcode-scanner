@@ -590,6 +590,24 @@ RAM 43.5% (142412 / 327680)、Flash 24.3% (763941 / 3145728)。host 1D 測試 24
 
 RAM 43.5% (142412)、Flash 24.3% (764065)。
 
+### 附記（2026-10-28）— 獨立診斷直接量測，再次坐實觸控硬體故障
+
+使用者要求「實測確認真的沒有 touch」。寫獨立診斷 sketch（`experiments/touch-test/`，不碰主韌體）
+在同一塊板子直接量測，用 IMU 當對照組：
+
+| 測試 | 結果 |
+|------|------|
+| I2C bus 本身（QMI8658 IMU @0x6B WHO_AM_I reg 0x00）| ✅ 讀到 0x05（bus/pull-up/速度/讀法全正常）|
+| CST816 @0x15 開機探測（id reg 0xA7，期望 0xB6）| ❌ NO-RESPONSE，id=0x00 |
+| **實體觸碰螢幕 30 秒持續按壓** | ❌ **0x15 回應 0 次**（idok/numok 全 0）|
+
+`[VERDICT] IMU@0x6B=OK(0x05) | CST816@0x15=NO-RESPONSE(0x00)`（持續 6 次一致）。
+
+關鍵對照：同一條 I2C bus（SDA=48/SCL=47）上 IMU 讀得到、觸控全無 ACK → 排除 bus/軟體層；
+加上 **實體觸碰 30 秒喚不醒**（非休眠/時序），直接量測坐實 2026-10-04 的推論結論：
+**CST816D 晶片/FPC 硬體故障**。操作續用 BOOT 單鍵 + serial 注入。診斷 sketch 保留於
+`experiments/touch-test/` 供日後換板/修硬體後重測。
+
 ---
 
 # Session 2026-10-04 (網路) — 接通 WiFi/MQTT + 移植 captive-portal 配網
@@ -1740,3 +1758,97 @@ scan-input 原全廣播。加 device_id 過濾(採裝置編號方案 a，不改 
 - 本機驗證: curl SSE ?device_id=esp32-001 + mosquitto_pub esp32-001/esp32-002 → 只收 esp32-001;
   單元測試 q_all=[A,B] q_001=[A] q_002=[B]。
 - 韌體無改動(payload 已含 device_id)。server 由使用者 git pull 部署。
+
+---
+
+# Session 2026-10-29 — LVGL UI 統一重構 + 字型 16px→20px（實機燒錄驗證）
+
+純 UI 層工作（只動 `src/ui/ui_main.cpp` + 字型檔），不碰導航模型/BLE/網路/掃描邏輯。
+每步 `pio run` 驗證，最後實機燒錄（/dev/ttyACM1）+ serial 導航實測通過。板子一切正常
+（IMU 0x05、SDHC 掛載、OV5640、觸控仍硬體不通=既知）。
+
+## 背景：ui_main.cpp 分階段長出、風格不一致
+
+檔案是分階段長出來的 —— HOME/SCAN/SETTINGS/INVENTORY/PHOTO 是早期手寫，RESULT/
+INVENTORY_LIST/LOG/ABOUT 是 Phase A 用新 helper 加的。客觀不一致點：
+1. 頁面容器兩套寫法（舊頁各手寫 8 行樣板；新頁用 create_page_container）。
+2. 字型混用（INVENTORY/PHOTO/狀態列用 lv_font_montserrat_12/14 純英文；其餘用 CJK）。
+3. 標題位置各異（SCAN 無標題、INVENTORY y=15、PHOTO y=30、ABOUT y=24、新頁 y=2）。
+4. 魔術色散落（{ .full = 0x07E0/0x8410/0xF800 } 遍布）。
+
+## 第一輪：重構 + 外觀統一（方向 3，使用者選）
+
+- 新增 `FONT_MAIN` 巨集（全檔字型單一來源）、語意色常數 `COL_ACCENT`(綠)/`COL_MUTED`(灰)/
+  `COL_ALERT`(紅)，取代所有散落 montserrat 與魔術色。
+- 新增 helper `create_page_title()`（統一標題 TOP_MID y=2 + CJK）；所有頁容器統一走
+  `create_page_container()`（刪 5 份手寫樣板）。
+- INVENTORY 英文「Stocktake Session」→「盤點作業」+CJK；PHOTO「Photo Mode」→「拍照辨識」；
+  狀態列 title/[W][M][B] 改 CJK 字型；ABOUT 標題 y=24→2。
+- show_page / ui_process_pending_scan 內盤點計數/狀態字串一併中文化（與頁面建立一致）。
+- 移除無定義的 update_status_bar forward decl。
+- build：Flash 58.1%→57.8%（移除 montserrat 連入，淨降 ~8.5KB）。
+
+## 第二輪：HOME + SETTINGS 統一成「大按鈕 + 可捲動清單」（使用者定案方向 a）
+
+使用者先問「首頁跟設定頁為什麼不同」→ 釐清：首頁是大按鈕無標題、設定頁是 34px 密集清單列+
+slider，屬 Phase A 刻意設計。使用者要求兩頁統一。來回確認：不是把設定頁改大按鈕、也不是都改
+矮清單列，而是**兩頁都用「大按鈕樣式 + 可捲動」**（方向 a）。
+
+- 新增共用 helper（HOME/SETTINGS 共用）：
+  * `create_scroll_list(parent, top_y)` — 可捲動 flex-column 容器（SCROLLBAR_AUTO）。
+  * `create_list_button(list, title, want_value, out_val)` — 滿版大按鈕（ITEM_H=50、圓角 8、
+    COL_NORMAL），左標籤，可選右側狀態值 label（透過 out 參數回傳）。
+  * `list_focus(btns, count, focus)` — 焦點按鈕變 COL_FOCUS + scroll_to_view。
+- 首頁：從絕對定位置中 4 大按鈕（無標題）→ 標題「主選單」+ 捲動清單 + 4 大按鈕。
+  `menu_item_t g_home_items[]` → `lv_obj_t* g_home_btns[]`，焦點走 list_focus。
+- 設定頁：34px 清單列 + slider → 7 顆大按鈕（同首頁樣式），每顆左標籤＋右狀態值。
+  **亮度列移除 slider**，改顯示數值 g_brightness（NAV_NEXT 短按 +40 wrap + display_set_brightness
+  即時套用 + settings_refresh；NAV_CONFIRM 移焦點離開）。語意與舊 slider 版一致。
+  移除死碼：g_settings_slider / g_settings_rows / g_settings_lbl_brightness / COL_SLIDER。
+- build：RAM 52.6% / Flash 57.8%。
+- 實機 serial 導航實測（h,n,n,c,n,n,n,n）：NAV_HOME→首頁移焦→進設定→設定清單循環，8 指令全處理、
+  全程無 crash。
+
+## 第三輪：字型 16px → 20px（使用者要求「字型再大點」→「從 16 換 20」）
+
+- 因全檔已統一 FONT_MAIN，只需換字型檔 + 2 行（LV_FONT_DECLARE + FONT_MAIN 巨集）。
+- 重新產生 20px CJK 子集字型（與 16px 完全相同的 5401 字 + ASCII 0x20-0x7F）：
+  * 工具鏈：nvm node v24 + lv_font_conv 1.5.3（memory 既載）。
+  * 來源 OTF：系統有現成 NotoSansTC-Regular.otf（外接碟），直接複製到 /tmp（省去從
+    NotoSansCJK.ttc 抽 TC face 的步驟）。/tmp 的 OTF 先前被清掉需重建。
+  * symbols：用 python 從舊 lv_font_cjk_tc_16.c 的 Opts 行正則抽出那 5401 字 → /tmp/symbols.txt
+    → `lv_font_conv --size 20 --bpp 2 ... --symbols "$(cat)" -o lv_font_cjk_tc_20.c`。
+- **坑**：lv_font_conv 1.5.3 產出的 include `#else` 分支是 `#include "lvgl/lvgl.h"`（本專案無此
+  路徑），需手改回 `#include <lvgl.h>`（對齊舊 16px 檔寫法）。否則 fatal error 編不過。
+- 刪除舊 lv_font_cjk_tc_16.c（它自帶 `#define LV_FONT_CJK_TC_16 1` 會強制編譯，留著=兩份字型
+  都佔 flash）。
+- build：Flash 57.8%→63.6%（+~183KB；20px .c 3.84MB vs 16px 2.7MB，壓縮後淨增）。RAM 不變 52.6%。
+- 實機燒錄 + 開機：9 頁建立成功、[DISPLAY] init done、無 crash；serial 導航 8 指令全處理、無 crash。
+
+## 字型放 SD？（使用者詢問，未實作）
+
+使用者問「字型可放 SD？」。**未動手改**，這是有明顯取捨的架構決定，已說明並建議留 flash：
+- 可行：字型不編進 flash、開機讀進 PSRAM、LVGL `lv_font_load()` + 檔案系統驅動接 SD。
+- 代價/風險（此板特別關鍵）：
+  1. **SD 是此板已知弱點**（memory 記過 2 張故障/山寨卡）；字型在 SD 上卡壞/沒插 → UI 中文
+     直接無法顯示。flash 字型永遠在。
+  2. SD 與 LCD 共用 SPI bus；常駐隨讀會與 flush 競爭（一次性載入 PSRAM 可避，但多吃 1-4MB
+     PSRAM，而 SVGA fb+luma+quirc 已吃 ~3.8MB）。
+  3. 需寫載入 + 無卡 fallback，工程量不小。
+- 建議：flash 還有 36% 餘裕，字型留 flash 最穩。若動機是省 flash/免重燒才值得做；可做
+  「SD 有字型就用、無則 flash 內建小字型墊底」兩段式（需 flash 保留一份小字型後備）。待使用者
+  確認目的與是否接受風險再決定。
+
+## 修改檔案
+
+- src/ui/ui_main.cpp（三輪：重構+外觀統一 / HOME+SETTINGS 大按鈕捲動清單 / FONT_MAIN→20px）
+- src/ui/fonts/lv_font_cjk_tc_20.c（新增，20px CJK 子集；手修 include 為 <lvgl.h>）
+- src/ui/fonts/lv_font_cjk_tc_16.c（刪除，已被 20px 取代）
+
+## 狀態
+
+- 以上變更已寫入檔案、已燒錄到板子，但**尚未 git commit**（工作區未提交）。
+- 測試用腳本留 /tmp（mon.py reset+讀取、nav4.py DTR+送 n/c/h 導航）。注意 ESP32-S3 USB-CDC
+  需 **setDTR(True)** host-present 才吃 serial 輸入（nav 指令才會被收到）；此環境 `pio device
+  monitor` 需互動式終端、無法在非互動 shell 跑，改用 pyserial 直接對話。
+- LCD 實際畫面無法遠端目視；以 build + 開機 log（[UI] initialized 9 頁）+ 導航無 crash 間接驗證。

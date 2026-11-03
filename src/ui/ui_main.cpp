@@ -3,11 +3,20 @@
  * @brief LVGL multi-page UI — single-button (BOOT key) navigation implementation
  *
  * Pages:
- *   HOME        — 3-item vertical menu (Scan / Settings / About)
- *   SCAN        — Scan status display
- *   SETTINGS    — Brightness slider
- *   INVENTORY   — Batch scan list
- *   PHOTO       — Camera capture result
+ *   HOME            — 4-item vertical menu (Scan / Inventory / Settings / About)
+ *   SCAN            — camera preview + scan status
+ *   RESULT          — query result detail (6 fields)
+ *   SETTINGS        — focusable settings list
+ *   INVENTORY       — stocktake session status
+ *   INVENTORY_LIST  — accumulated stocktake list
+ *   PHOTO           — camera capture / AI OCR result
+ *   LOG             — per-day work log
+ *   ABOUT           — firmware info
+ *
+ * All pages share a common look: a full-screen container created via
+ * create_page_container(), a centered CJK title created via
+ * create_page_title(), the lv_font_cjk_tc_20 font, and the COL_* palette
+ * constants below. Avoid hard-coded RGB565 literals — add a COL_* constant.
  */
 
 #include "ui_main.h"
@@ -23,9 +32,9 @@
 #include "network/ble_hid.h"
 #include "storage/scan_log.h"
 
-// Traditional-Chinese CJK font (16px, bpp2) — generated subset
-// (Big5 level-1 ~5401 chars + ASCII). Defined in src/ui/fonts/lv_font_cjk_tc_16.c
-LV_FONT_DECLARE(lv_font_cjk_tc_16);
+// Traditional-Chinese CJK font (20px, bpp2) — generated subset
+// (Big5 level-1 ~5401 chars + ASCII). Defined in src/ui/fonts/lv_font_cjk_tc_20.c
+LV_FONT_DECLARE(lv_font_cjk_tc_20);
 
 // ─── Screen dimensions ────────────────────────────────────────────────────────
 
@@ -45,7 +54,15 @@ static const lv_color_t COL_FOCUS    = { .full = 0x04A1 };  // focus highlight b
 static const lv_color_t COL_NORMAL   = { .full = 0x18E3 };  // normal button
 static const lv_color_t COL_TEXT     = { .full = 0xFFFF };  // white text
 static const lv_color_t COL_STATUS  = { .full = 0x7BEF };  // status bar bg
-static const lv_color_t COL_SLIDER  = { .full = 0x04A1 };  // slider color
+
+// Semantic accent colors (replace scattered raw RGB565 literals)
+static const lv_color_t COL_ACCENT   = { .full = 0x07E0 };  // green — primary accent / OK
+static const lv_color_t COL_MUTED    = { .full = 0x8410 };  // grey — hints / disabled
+static const lv_color_t COL_ALERT    = { .full = 0xF800 };  // red — error / disconnected
+
+// Unified title font (CJK, 20px — also covers ASCII). All page titles, labels
+// and status text use this so pages render Chinese and look consistent.
+#define FONT_MAIN   (&lv_font_cjk_tc_20)
 
 // ─── LVGL Animations ──────────────────────────────────────────────────────────
 
@@ -131,7 +148,7 @@ typedef enum {
     HOME_ITEM_COUNT
 } home_item_t;
 
-static menu_item_t g_home_items[HOME_ITEM_COUNT];
+static lv_obj_t* g_home_btns[HOME_ITEM_COUNT] = {nullptr};
 
 // ─── SCAN page widgets ────────────────────────────────────────────────────────
 
@@ -303,10 +320,9 @@ typedef enum {
 } settings_row_t;
 
 static lv_obj_t* g_settings_list = nullptr;        // scrollable list container
-static lv_obj_t* g_settings_rows[SETTINGS_ROW_COUNT] = {nullptr};
-static lv_obj_t* g_settings_vals[SETTINGS_ROW_COUNT] = {nullptr};
-static lv_obj_t* g_settings_slider = nullptr;       // brightness slider (in its row)
-static lv_obj_t* g_settings_lbl_brightness = nullptr;
+static lv_obj_t* g_settings_btns[SETTINGS_ROW_COUNT] = {nullptr};  // large buttons
+static lv_obj_t* g_settings_vals[SETTINGS_ROW_COUNT] = {nullptr};  // right-side value labels
+static uint8_t   g_brightness = DISP_BL_DEFAULT;   // current brightness (shown on its button)
 static int8_t    g_settings_focus = 0;
 static bool      g_settings_lang_zh = true;         // true=繁中, false=English
 static ui_wifi_portal_cb_t g_wifi_portal_cb = nullptr;
@@ -338,8 +354,15 @@ static void settings_refresh(void);
 static void update_settings_focus(void);
 static void log_render(void);
 static void log_update_date_label(void);
-static void set_item_focused(menu_item_t* item, bool focused);
-static void update_status_bar(void);
+
+// Shared page builders (defined mid-file, declared here so every create_*_page
+// can use them regardless of definition order).
+static lv_obj_t* create_page_container(void);
+static lv_obj_t* create_page_title(lv_obj_t* parent, const char* text);
+static lv_obj_t* create_scroll_list(lv_obj_t* parent, int16_t top_y);
+static lv_obj_t* create_list_button(lv_obj_t* list, const char* title,
+                                    bool want_value, lv_obj_t** out_val);
+static void list_focus(lv_obj_t* const* btns, int count, int focus);
 
 // ─── Public: init ─────────────────────────────────────────────────────────────
 
@@ -358,28 +381,28 @@ void ui_main_init(void) {
     lv_obj_t* lbl_title = lv_label_create(g_status_bar);
     lv_label_set_text(lbl_title, BOARD_NAME);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(lbl_title, FONT_MAIN, 0);
     lv_obj_align(lbl_title, LV_ALIGN_LEFT_MID, 8, 0);
 
     // WiFi icon (right side, before MQTT icon)
     g_icon_wifi = lv_label_create(g_status_bar);
     lv_label_set_text(g_icon_wifi, "[W]");
-    lv_obj_set_style_text_color(g_icon_wifi, (lv_color_t){ .full = 0xF800 }, 0);  // red = disconnected
-    lv_obj_set_style_text_font(g_icon_wifi, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_icon_wifi, COL_ALERT, 0);  // red = disconnected
+    lv_obj_set_style_text_font(g_icon_wifi, FONT_MAIN, 0);
     lv_obj_align(g_icon_wifi, LV_ALIGN_RIGHT_MID, -80, 0);
 
     // MQTT icon
     g_icon_mqtt = lv_label_create(g_status_bar);
     lv_label_set_text(g_icon_mqtt, "[M]");
-    lv_obj_set_style_text_color(g_icon_mqtt, (lv_color_t){ .full = 0xF800 }, 0);  // red = disconnected
-    lv_obj_set_style_text_font(g_icon_mqtt, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_icon_mqtt, COL_ALERT, 0);  // red = disconnected
+    lv_obj_set_style_text_font(g_icon_mqtt, FONT_MAIN, 0);
     lv_obj_align(g_icon_mqtt, LV_ALIGN_RIGHT_MID, -52, 0);
 
     // BLE icon — grey=off, red=advertising/waiting, green=connected
     g_icon_ble = lv_label_create(g_status_bar);
     lv_label_set_text(g_icon_ble, "[B]");
-    lv_obj_set_style_text_color(g_icon_ble, (lv_color_t){ .full = 0x8410 }, 0);   // grey = off
-    lv_obj_set_style_text_font(g_icon_ble, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_icon_ble, COL_MUTED, 0);   // grey = off
+    lv_obj_set_style_text_font(g_icon_ble, FONT_MAIN, 0);
     lv_obj_align(g_icon_ble, LV_ALIGN_RIGHT_MID, -24, 0);
 
     // Pages
@@ -474,12 +497,12 @@ static void show_page(ui_page_t page) {
             g_at_home = false;
             anim_page_slide_in(g_page_inventory);
             if (g_inv_lbl_count) {
-                lv_label_set_text_fmt(g_inv_lbl_count, "%d barcode(s) counted", g_st_entry_count);
+                lv_label_set_text_fmt(g_inv_lbl_count, "已盤點 %d 筆", g_st_entry_count);
             }
             if (g_inv_lbl_status) {
                 lv_label_set_text(g_inv_lbl_status,
-                    g_st_active ? "Long-press to end session"
-                                : "Scan in STOCKTAKE mode to start");
+                    g_st_active ? "長按結束盤點作業"
+                                : "切換至盤點模式開始");
             }
             break;
         case UI_PAGE_PHOTO:
@@ -521,19 +544,15 @@ static void show_page(ui_page_t page) {
 }
 
 // ─── HOME page ────────────────────────────────────────────────────────────────
+// Same look as SETTINGS: a scrollable column of large buttons below a title.
+
+static lv_obj_t* g_home_list = nullptr;
 
 static void create_home_page(void) {
-    g_page_home = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(g_page_home, SCR_W, SCR_H - STATUS_H);
-    lv_obj_set_pos(g_page_home, 0, STATUS_H);
-    lv_obj_set_style_bg_color(g_page_home, COL_BG, 0);
-    lv_obj_set_style_radius(g_page_home, 0, 0);
-    // Zero the default lv_obj padding + border so the absolute button positions
-    // below are measured from the real page edges (otherwise the ~5px content
-    // padding shifts every item down/right and they look off-centre).
-    lv_obj_set_style_pad_all(g_page_home, 0, 0);
-    lv_obj_set_style_border_width(g_page_home, 0, 0);
-    lv_obj_set_scrollbar_mode(g_page_home, LV_SCROLLBAR_MODE_OFF);
+    g_page_home = create_page_container();
+    lv_obj_clear_flag(g_page_home, LV_OBJ_FLAG_HIDDEN);  // HOME is shown first
+
+    create_page_title(g_page_home, "主選單");
 
     const char* labels[HOME_ITEM_COUNT] = {
         [HOME_ITEM_SCAN]      = "掃描",
@@ -542,42 +561,16 @@ static void create_home_page(void) {
         [HOME_ITEM_ABOUT]     = "關於"
     };
 
-    // Calculate vertical centering
-    uint16_t total_h = HOME_ITEM_COUNT * ITEM_H + (HOME_ITEM_COUNT - 1) * ITEM_GAP;
-    int16_t start_y = (SCR_H - STATUS_H - total_h) / 2;
-
+    g_home_list = create_scroll_list(g_page_home, 26);
     for (int i = 0; i < HOME_ITEM_COUNT; i++) {
-        menu_item_t* it = &g_home_items[i];
-        it->label = labels[i];
-
-        // Button
-        it->btn = lv_btn_create(g_page_home);
-        lv_obj_set_size(it->btn, 200, ITEM_H);
-        lv_obj_set_pos(it->btn, (SCR_W - 200) / 2, start_y + i * (ITEM_H + ITEM_GAP));
-        lv_obj_set_style_radius(it->btn, 8, 0);
-        lv_obj_set_style_bg_color(it->btn, COL_NORMAL, 0);
-        lv_obj_set_style_bg_opa(it->btn, LV_OPA_COVER, 0);
-
-        // Label
-        it->lbl = lv_label_create(it->btn);
-        lv_label_set_text(it->lbl, it->label);
-        lv_obj_center(it->lbl);
-        lv_obj_set_style_text_color(it->lbl, COL_TEXT, 0);
-        lv_obj_set_style_text_font(it->lbl, &lv_font_cjk_tc_16, 0);
+        g_home_btns[i] = create_list_button(g_home_list, labels[i], false, nullptr);
     }
 
     update_home_focus();
 }
 
-static void set_item_focused(menu_item_t* item, bool focused) {
-    if (!item || !item->btn) return;
-    lv_obj_set_style_bg_color(item->btn, focused ? COL_FOCUS : COL_NORMAL, 0);
-}
-
 static void update_home_focus(void) {
-    for (int i = 0; i < HOME_ITEM_COUNT; i++) {
-        set_item_focused(&g_home_items[i], (i == g_home_focus));
-    }
+    list_focus(g_home_btns, HOME_ITEM_COUNT, g_home_focus);
 }
 
 static void on_home_select(int8_t idx) {
@@ -602,41 +595,35 @@ static void on_home_select(int8_t idx) {
 // ─── SCAN page ───────────────────────────────────────────────────────────────
 
 static void create_scan_page(void) {
-    g_page_scan = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(g_page_scan, SCR_W, SCR_H - STATUS_H);
-    lv_obj_set_pos(g_page_scan, 0, STATUS_H);
-    lv_obj_set_style_bg_color(g_page_scan, COL_BG, 0);
-    lv_obj_set_style_radius(g_page_scan, 0, 0);
-    lv_obj_set_scrollbar_mode(g_page_scan, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(g_page_scan, LV_OBJ_FLAG_HIDDEN);
+    g_page_scan = create_page_container();
 
     // Mode indicator label (top-left)
     g_scan_lbl_mode = lv_label_create(g_page_scan);
     lv_label_set_text(g_scan_lbl_mode, "[QUERY]");
-    lv_obj_set_style_text_color(g_scan_lbl_mode, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_scan_lbl_mode, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(g_scan_lbl_mode, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_scan_lbl_mode, FONT_MAIN, 0);
     lv_obj_align(g_scan_lbl_mode, LV_ALIGN_TOP_LEFT, 10, 6);
 
     // Status label
     g_scan_lbl_status = lv_label_create(g_page_scan);
     lv_label_set_text(g_scan_lbl_status, "Ready to Scan");
     lv_obj_set_style_text_color(g_scan_lbl_status, COL_TEXT, 0);
-    lv_obj_set_style_text_font(g_scan_lbl_status, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_font(g_scan_lbl_status, FONT_MAIN, 0);
     lv_obj_align(g_scan_lbl_status, LV_ALIGN_TOP_MID, 0, 26);
 
     // Barcode result
     g_scan_lbl_barcode = lv_label_create(g_page_scan);
     lv_label_set_text(g_scan_lbl_barcode, "");
-    lv_obj_set_style_text_color(g_scan_lbl_barcode, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_scan_lbl_barcode, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(g_scan_lbl_barcode, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_scan_lbl_barcode, FONT_MAIN, 0);
     lv_obj_align(g_scan_lbl_barcode, LV_ALIGN_TOP_MID, 0, 60);
     lv_obj_set_width(g_scan_lbl_barcode, 220);
 
     // Info line
     g_scan_lbl_info = lv_label_create(g_page_scan);
     lv_label_set_text(g_scan_lbl_info, "短按:掃描  長按:換模式");
-    lv_obj_set_style_text_color(g_scan_lbl_info, (lv_color_t){ .full = 0x8410 }, 0); // dim grey
-    lv_obj_set_style_text_font(g_scan_lbl_info, &lv_font_cjk_tc_16, 0);  // CJK (incl ASCII)
+    lv_obj_set_style_text_color(g_scan_lbl_info, COL_MUTED, 0); // dim grey
+    lv_obj_set_style_text_font(g_scan_lbl_info, FONT_MAIN, 0);  // CJK (incl ASCII)
     lv_obj_align(g_scan_lbl_info, LV_ALIGN_TOP_MID, 0, 95);
 
     // Stocktake feedback line — BELOW the viewfinder (screen y>=235, i.e. page
@@ -644,8 +631,8 @@ static void create_scan_page(void) {
     // so Chinese item names render.
     g_scan_lbl_stocktake = lv_label_create(g_page_scan);
     lv_label_set_text(g_scan_lbl_stocktake, "");
-    lv_obj_set_style_text_color(g_scan_lbl_stocktake, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_scan_lbl_stocktake, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(g_scan_lbl_stocktake, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_scan_lbl_stocktake, FONT_MAIN, 0);
     lv_obj_set_width(g_scan_lbl_stocktake, 230);
     lv_obj_align(g_scan_lbl_stocktake, LV_ALIGN_TOP_MID, 0, 215);
 }
@@ -653,74 +640,20 @@ static void create_scan_page(void) {
 // ─── SETTINGS page ────────────────────────────────────────────────────────────
 
 static void create_settings_page(void) {
-    g_page_settings = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(g_page_settings, SCR_W, SCR_H - STATUS_H);
-    lv_obj_set_pos(g_page_settings, 0, STATUS_H);
-    lv_obj_set_style_bg_color(g_page_settings, COL_BG, 0);
-    lv_obj_set_style_radius(g_page_settings, 0, 0);
-    lv_obj_set_style_border_width(g_page_settings, 0, 0);
-    lv_obj_set_scrollbar_mode(g_page_settings, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(g_page_settings, LV_OBJ_FLAG_HIDDEN);
+    g_page_settings = create_page_container();
 
-    lv_obj_t* title = lv_label_create(g_page_settings);
-    lv_label_set_text(title, "設定");
-    lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(title, &lv_font_cjk_tc_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
-
-    // Scrollable list container
-    g_settings_list = lv_obj_create(g_page_settings);
-    lv_obj_set_size(g_settings_list, 232, SCR_H - STATUS_H - 32);
-    lv_obj_align(g_settings_list, LV_ALIGN_TOP_MID, 0, 26);
-    lv_obj_set_style_bg_color(g_settings_list, COL_BG, 0);
-    lv_obj_set_style_border_width(g_settings_list, 0, 0);
-    lv_obj_set_style_pad_all(g_settings_list, 2, 0);
-    lv_obj_set_style_pad_row(g_settings_list, 4, 0);
-    lv_obj_set_flex_flow(g_settings_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_scrollbar_mode(g_settings_list, LV_SCROLLBAR_MODE_AUTO);
+    create_page_title(g_page_settings, "設定");
 
     const char* row_labels[SETTINGS_ROW_COUNT] = {
         "WiFi", "MQTT", "藍牙 HID", "亮度", "音量", "語言", "工作日誌"
     };
 
+    // Scrollable column of large buttons (same look as HOME). Every row has a
+    // left title and a right-aligned value label (status / brightness / etc).
+    g_settings_list = create_scroll_list(g_page_settings, 26);
     for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
-        lv_obj_t* row = lv_obj_create(g_settings_list);
-        lv_obj_set_size(row, lv_pct(100), 34);
-        lv_obj_set_style_bg_color(row, COL_PANEL, 0);
-        lv_obj_set_style_border_width(row, 1, 0);
-        lv_obj_set_style_border_color(row, COL_PANEL, 0);
-        lv_obj_set_style_radius(row, 4, 0);
-        lv_obj_set_style_pad_hor(row, 8, 0);
-        lv_obj_set_scrollbar_mode(row, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        g_settings_rows[i] = row;
-
-        lv_obj_t* lbl = lv_label_create(row);
-        lv_label_set_text(lbl, row_labels[i]);
-        lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-        lv_obj_set_style_text_font(lbl, &lv_font_cjk_tc_16, 0);
-        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
-
-        if (i == SET_ROW_BRIGHTNESS) {
-            // Brightness slider lives inside its row (right side).
-            g_settings_slider = lv_slider_create(row);
-            lv_obj_set_size(g_settings_slider, 110, 8);
-            lv_obj_align(g_settings_slider, LV_ALIGN_RIGHT_MID, 0, 0);
-            lv_slider_set_range(g_settings_slider, 10, 255);
-            lv_slider_set_value(g_settings_slider, DISP_BL_DEFAULT, LV_ANIM_OFF);
-            lv_obj_set_style_bg_color(g_settings_slider, COL_BG, 0);
-            lv_obj_set_style_bg_color(g_settings_slider, COL_SLIDER, LV_PART_INDICATOR);
-            lv_obj_set_style_bg_color(g_settings_slider, COL_FOCUS, LV_PART_KNOB);
-            g_settings_lbl_brightness = lbl;
-        } else {
-            // Value / status label (right side).
-            lv_obj_t* val = lv_label_create(row);
-            lv_label_set_text(val, "--");
-            lv_obj_set_style_text_color(val, (lv_color_t){ .full = 0x07E0 }, 0);
-            lv_obj_set_style_text_font(val, &lv_font_cjk_tc_16, 0);
-            lv_obj_align(val, LV_ALIGN_RIGHT_MID, 0, 0);
-            g_settings_vals[i] = val;
-        }
+        g_settings_btns[i] = create_list_button(g_settings_list, row_labels[i],
+                                                true, &g_settings_vals[i]);
     }
     g_settings_focus = 0;
 }
@@ -740,6 +673,9 @@ static void settings_refresh(void) {
                          : (ble_hid_is_connected() ? "已連線" : "等待配對");
         lv_label_set_text(g_settings_vals[SET_ROW_BLE], bs);
     }
+    if (g_settings_vals[SET_ROW_BRIGHTNESS]) {
+        lv_label_set_text_fmt(g_settings_vals[SET_ROW_BRIGHTNESS], "%d", g_brightness);
+    }
     if (g_settings_vals[SET_ROW_VOLUME]) {
         lv_label_set_text(g_settings_vals[SET_ROW_VOLUME], "60%");   // Phase A stub
     }
@@ -753,73 +689,60 @@ static void settings_refresh(void) {
 }
 
 static void update_settings_focus(void) {
-    for (int i = 0; i < SETTINGS_ROW_COUNT; i++) {
-        if (!g_settings_rows[i]) continue;
-        bool f = (i == g_settings_focus);
-        lv_obj_set_style_border_color(g_settings_rows[i], f ? COL_FOCUS : COL_PANEL, 0);
-        lv_obj_set_style_bg_color(g_settings_rows[i], f ? COL_FOCUS : COL_PANEL, 0);
-        if (f) lv_obj_scroll_to_view(g_settings_rows[i], LV_ANIM_OFF);
-    }
+    list_focus(g_settings_btns, SETTINGS_ROW_COUNT, g_settings_focus);
 }
 
 // ─── INVENTORY page ───────────────────────────────────────────────────────────
 
 static void create_inventory_page(void) {
-    g_page_inventory = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(g_page_inventory, SCR_W, SCR_H - STATUS_H);
-    lv_obj_set_pos(g_page_inventory, 0, STATUS_H);
-    lv_obj_set_style_bg_color(g_page_inventory, COL_BG, 0);
-    lv_obj_set_style_radius(g_page_inventory, 0, 0);
-    lv_obj_set_scrollbar_mode(g_page_inventory, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(g_page_inventory, LV_OBJ_FLAG_HIDDEN);
+    g_page_inventory = create_page_container();
 
     // Title
-    lv_obj_t* lbl = lv_label_create(g_page_inventory);
-    lv_label_set_text(lbl, "Stocktake Session");
-    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 15);
+    create_page_title(g_page_inventory, "盤點作業");
 
     // Item count
     g_inv_lbl_count = lv_label_create(g_page_inventory);
-    lv_label_set_text(g_inv_lbl_count, "0 barcode(s) counted");
-    lv_obj_set_style_text_color(g_inv_lbl_count, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_inv_lbl_count, &lv_font_montserrat_12, 0);
+    lv_label_set_text(g_inv_lbl_count, "已盤點 0 筆");
+    lv_obj_set_style_text_color(g_inv_lbl_count, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_inv_lbl_count, FONT_MAIN, 0);
     lv_obj_align(g_inv_lbl_count, LV_ALIGN_TOP_MID, 0, 45);
 
     // Status line
     g_inv_lbl_status = lv_label_create(g_page_inventory);
-    lv_label_set_text(g_inv_lbl_status, "Scan in STOCKTAKE mode to start");
-    lv_obj_set_style_text_color(g_inv_lbl_status, (lv_color_t){ .full = 0x8410 }, 0);
-    lv_obj_set_style_text_font(g_inv_lbl_status, &lv_font_montserrat_12, 0);
+    lv_label_set_text(g_inv_lbl_status, "切換至盤點模式開始");
+    lv_obj_set_style_text_color(g_inv_lbl_status, COL_MUTED, 0);
+    lv_obj_set_style_text_font(g_inv_lbl_status, FONT_MAIN, 0);
     lv_obj_align(g_inv_lbl_status, LV_ALIGN_TOP_MID, 0, 70);
+
+    // Navigation hint
+    lv_obj_t* hint = lv_label_create(g_page_inventory);
+    lv_label_set_text(hint, "短按:查看清單  長按:結束作業");
+    lv_obj_set_style_text_color(hint, COL_MUTED, 0);
+    lv_obj_set_style_text_font(hint, FONT_MAIN, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -8);
 }
 
 // ─── PHOTO page ───────────────────────────────────────────────────────────────
 
 static void create_photo_page(void) {
-    g_page_photo = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(g_page_photo, SCR_W, SCR_H - STATUS_H);
-    lv_obj_set_pos(g_page_photo, 0, STATUS_H);
-    lv_obj_set_style_bg_color(g_page_photo, COL_BG, 0);
-    lv_obj_set_style_radius(g_page_photo, 0, 0);
-    lv_obj_set_scrollbar_mode(g_page_photo, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_flag(g_page_photo, LV_OBJ_FLAG_HIDDEN);
+    g_page_photo = create_page_container();
+
+    create_page_title(g_page_photo, "拍照辨識");
 
     g_photo_lbl_status = lv_label_create(g_page_photo);
-    lv_label_set_text(g_photo_lbl_status, "Photo Mode");
+    lv_label_set_text(g_photo_lbl_status, "準備拍照");
     lv_obj_set_style_text_color(g_photo_lbl_status, COL_TEXT, 0);
-    lv_obj_set_style_text_font(g_photo_lbl_status, &lv_font_montserrat_14, 0);
-    lv_obj_align(g_photo_lbl_status, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_set_style_text_font(g_photo_lbl_status, FONT_MAIN, 0);
+    lv_obj_align(g_photo_lbl_status, LV_ALIGN_TOP_MID, 0, 40);
 
     g_photo_lbl_result = lv_label_create(g_page_photo);
-    lv_label_set_text(g_photo_lbl_result, "Capture to recognize");
-    lv_obj_set_style_text_color(g_photo_lbl_result, (lv_color_t){ .full = 0x8410 }, 0);
-    lv_obj_set_style_text_font(g_photo_lbl_result, &lv_font_montserrat_12, 0);
-    lv_obj_align(g_photo_lbl_result, LV_ALIGN_TOP_MID, 0, 60);
+    lv_label_set_text(g_photo_lbl_result, "拍照後上傳辨識");
+    lv_obj_set_style_text_color(g_photo_lbl_result, COL_MUTED, 0);
+    lv_obj_set_style_text_font(g_photo_lbl_result, FONT_MAIN, 0);
+    lv_obj_align(g_photo_lbl_result, LV_ALIGN_TOP_MID, 0, 70);
 }
 
-// ─── Shared helpers for new pages ─────────────────────────────────────────────
+// ─── Shared helpers for all pages ─────────────────────────────────────────────
 
 // Create a standard full-screen page container (below the status bar), hidden.
 static lv_obj_t* create_page_container(void) {
@@ -828,10 +751,22 @@ static lv_obj_t* create_page_container(void) {
     lv_obj_set_pos(page, 0, STATUS_H);
     lv_obj_set_style_bg_color(page, COL_BG, 0);
     lv_obj_set_style_radius(page, 0, 0);
+    lv_obj_set_style_pad_all(page, 0, 0);
     lv_obj_set_style_border_width(page, 0, 0);
     lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(page, LV_OBJ_FLAG_HIDDEN);
     return page;
+}
+
+// Create a standard centered page title at the top of a page. Uniform position
+// (TOP_MID, y=2), CJK font and color across all pages. Returns the label.
+static lv_obj_t* create_page_title(lv_obj_t* parent, const char* text) {
+    lv_obj_t* title = lv_label_create(parent);
+    lv_label_set_text(title, text);
+    lv_obj_set_style_text_color(title, COL_TEXT, 0);
+    lv_obj_set_style_text_font(title, FONT_MAIN, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+    return title;
 }
 
 // Create an action button with a centered CJK label. Returns the button.
@@ -846,13 +781,79 @@ static lv_obj_t* create_action_btn(lv_obj_t* parent, const char* text,
     lv_label_set_text(lbl, text);
     lv_obj_center(lbl);
     lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
-    lv_obj_set_style_text_font(lbl, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_font(lbl, FONT_MAIN, 0);
     return btn;
 }
 
 static void set_btn_focused(lv_obj_t* btn, bool focused) {
     if (!btn) return;
     lv_obj_set_style_bg_color(btn, focused ? COL_FOCUS : COL_NORMAL, 0);
+}
+
+// ─── Shared scrollable list of large buttons (HOME + SETTINGS) ────────────────
+// Both the HOME menu and the SETTINGS page use the same look: a vertically
+// scrollable column of full-width large buttons (ITEM_H tall). A focused button
+// turns COL_FOCUS and is scrolled into view (see list_focus()).
+
+// Create the scrollable flex-column container that holds the list buttons.
+// Fills the page below the title bar. Transparent background so only the
+// buttons are visible against the page.
+static lv_obj_t* create_scroll_list(lv_obj_t* parent, int16_t top_y) {
+    lv_obj_t* list = lv_obj_create(parent);
+    lv_obj_set_size(list, SCR_W, (SCR_H - STATUS_H) - top_y);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, top_y);
+    lv_obj_set_style_bg_color(list, COL_BG, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_radius(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 6, 0);
+    lv_obj_set_style_pad_row(list, ITEM_GAP, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_AUTO);
+    return list;
+}
+
+// Create one large list button inside a scroll list. Left-aligned CJK title;
+// if want_value is true, a right-aligned value label is created and returned
+// via *out_val (used by SETTINGS for status text / brightness value). The
+// button itself is returned.
+static lv_obj_t* create_list_button(lv_obj_t* list, const char* title,
+                                    bool want_value, lv_obj_t** out_val) {
+    lv_obj_t* btn = lv_btn_create(list);
+    lv_obj_set_size(btn, lv_pct(100), ITEM_H);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_set_style_bg_color(btn, COL_NORMAL, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_hor(btn, 14, 0);
+    lv_obj_set_scrollbar_mode(btn, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, title);
+    lv_obj_set_style_text_color(lbl, COL_TEXT, 0);
+    lv_obj_set_style_text_font(lbl, FONT_MAIN, 0);
+    lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 0, 0);
+
+    if (want_value && out_val) {
+        lv_obj_t* val = lv_label_create(btn);
+        lv_label_set_text(val, "--");
+        lv_obj_set_style_text_color(val, COL_ACCENT, 0);
+        lv_obj_set_style_text_font(val, FONT_MAIN, 0);
+        lv_obj_align(val, LV_ALIGN_RIGHT_MID, 0, 0);
+        *out_val = val;
+    }
+    return btn;
+}
+
+// Highlight the focused button in a list and scroll it into view.
+static void list_focus(lv_obj_t* const* btns, int count, int focus) {
+    for (int i = 0; i < count; i++) {
+        if (!btns[i]) continue;
+        bool f = (i == focus);
+        lv_obj_set_style_bg_color(btns[i], f ? COL_FOCUS : COL_NORMAL, 0);
+        if (f) lv_obj_scroll_to_view(btns[i], LV_ANIM_OFF);
+    }
 }
 
 // ─── RESULT page ──────────────────────────────────────────────────────────────
@@ -862,14 +863,13 @@ static lv_obj_t* result_field_row(lv_obj_t* parent, const char* label_text,
     lv_obj_t* lbl = lv_label_create(parent);
     lv_label_set_text(lbl, label_text);
     lv_obj_set_style_text_color(lbl, COL_STATUS, 0);  // muted
-    lv_obj_set_style_text_font(lbl, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_font(lbl, FONT_MAIN, 0);
     lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 10, y);
 
     lv_obj_t* val = lv_label_create(parent);
     lv_label_set_text(val, "--");
-    lv_obj_set_style_text_color(val,
-        highlight ? (lv_color_t){ .full = 0x07E0 } : COL_TEXT, 0);
-    lv_obj_set_style_text_font(val, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(val, highlight ? COL_ACCENT : COL_TEXT, 0);
+    lv_obj_set_style_text_font(val, FONT_MAIN, 0);
     lv_obj_set_width(val, 150);
     lv_obj_align(val, LV_ALIGN_TOP_LEFT, 80, y);
     return val;
@@ -878,16 +878,12 @@ static lv_obj_t* result_field_row(lv_obj_t* parent, const char* label_text,
 static void create_result_page(void) {
     g_page_result = create_page_container();
 
-    lv_obj_t* title = lv_label_create(g_page_result);
-    lv_label_set_text(title, "查詢結果");
-    lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(title, &lv_font_cjk_tc_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+    create_page_title(g_page_result, "查詢結果");
 
     g_result_lbl_barcode = lv_label_create(g_page_result);
     lv_label_set_text(g_result_lbl_barcode, "");
-    lv_obj_set_style_text_color(g_result_lbl_barcode, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_result_lbl_barcode, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(g_result_lbl_barcode, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_result_lbl_barcode, FONT_MAIN, 0);
     lv_obj_set_width(g_result_lbl_barcode, 220);
     lv_obj_align(g_result_lbl_barcode, LV_ALIGN_TOP_MID, 0, 24);
 
@@ -935,16 +931,12 @@ static void result_populate(const char* barcode, const char* name,
 static void create_inventory_list_page(void) {
     g_page_inventory_list = create_page_container();
 
-    lv_obj_t* title = lv_label_create(g_page_inventory_list);
-    lv_label_set_text(title, "盤點清單");
-    lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(title, &lv_font_cjk_tc_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+    create_page_title(g_page_inventory_list, "盤點清單");
 
     g_invlist_lbl_count = lv_label_create(g_page_inventory_list);
     lv_label_set_text(g_invlist_lbl_count, "共 0 筆");
-    lv_obj_set_style_text_color(g_invlist_lbl_count, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_invlist_lbl_count, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(g_invlist_lbl_count, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_invlist_lbl_count, FONT_MAIN, 0);
     lv_obj_align(g_invlist_lbl_count, LV_ALIGN_TOP_MID, 0, 24);
 
     // Scrollable list body
@@ -987,7 +979,7 @@ static void invlist_render(void) {
         lv_obj_t* empty = lv_label_create(g_invlist_container);
         lv_label_set_text(empty, "尚無資料");
         lv_obj_set_style_text_color(empty, COL_STATUS, 0);
-        lv_obj_set_style_text_font(empty, &lv_font_cjk_tc_16, 0);
+        lv_obj_set_style_text_font(empty, FONT_MAIN, 0);
         return;
     }
 
@@ -996,8 +988,8 @@ static void invlist_render(void) {
         lv_label_set_text_fmt(row, "%d. %s  x%d",
                               i + 1, g_st_entries[i].barcode,
                               g_st_entries[i].actual_qty);
-        lv_obj_set_style_text_color(row, (lv_color_t){ .full = 0x07E0 }, 0);
-        lv_obj_set_style_text_font(row, &lv_font_cjk_tc_16, 0);
+        lv_obj_set_style_text_color(row, COL_ACCENT, 0);
+        lv_obj_set_style_text_font(row, FONT_MAIN, 0);
         lv_obj_set_width(row, lv_pct(100));
     }
 }
@@ -1028,7 +1020,7 @@ static void log_render(void) {
         lv_obj_t* empty = lv_label_create(g_log_body);
         lv_label_set_text(empty, "尚無紀錄");
         lv_obj_set_style_text_color(empty, COL_STATUS, 0);
-        lv_obj_set_style_text_font(empty, &lv_font_cjk_tc_16, 0);
+        lv_obj_set_style_text_font(empty, FONT_MAIN, 0);
         return;
     }
 
@@ -1042,8 +1034,8 @@ static void log_render(void) {
 
         lv_obj_t* row = lv_label_create(g_log_body);
         lv_label_set_text_fmt(row, "%s %s %s", clock, type, content);
-        lv_obj_set_style_text_color(row, (lv_color_t){ .full = 0x07E0 }, 0);
-        lv_obj_set_style_text_font(row, &lv_font_cjk_tc_16, 0);
+        lv_obj_set_style_text_color(row, COL_ACCENT, 0);
+        lv_obj_set_style_text_font(row, FONT_MAIN, 0);
         lv_obj_set_width(row, lv_pct(100));
     }
 }
@@ -1051,15 +1043,11 @@ static void log_render(void) {
 static void create_log_page(void) {
     g_page_log = create_page_container();
 
-    lv_obj_t* title = lv_label_create(g_page_log);
-    lv_label_set_text(title, "工作日誌");
-    lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(title, &lv_font_cjk_tc_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+    create_page_title(g_page_log, "工作日誌");
 
     g_log_lbl_date = lv_label_create(g_page_log);
-    lv_obj_set_style_text_color(g_log_lbl_date, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(g_log_lbl_date, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(g_log_lbl_date, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(g_log_lbl_date, FONT_MAIN, 0);
     lv_obj_align(g_log_lbl_date, LV_ALIGN_TOP_MID, 0, 26);
     log_update_date_label();
 
@@ -1079,7 +1067,7 @@ static void create_log_page(void) {
     lv_obj_t* hint = lv_label_create(g_page_log);
     lv_label_set_text(hint, "短按:換日  長按:返回");
     lv_obj_set_style_text_color(hint, COL_STATUS, 0);
-    lv_obj_set_style_text_font(hint, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_font(hint, FONT_MAIN, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -6);
 }
 
@@ -1088,11 +1076,7 @@ static void create_log_page(void) {
 static void create_about_page(void) {
     g_page_about = create_page_container();
 
-    lv_obj_t* title = lv_label_create(g_page_about);
-    lv_label_set_text(title, "韌體資訊");
-    lv_obj_set_style_text_color(title, COL_TEXT, 0);
-    lv_obj_set_style_text_font(title, &lv_font_cjk_tc_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
+    create_page_title(g_page_about, "韌體資訊");
 
     lv_obj_t* info = lv_label_create(g_page_about);
     lv_label_set_text(info,
@@ -1102,15 +1086,15 @@ static void create_about_page(void) {
         "Display: ST7789T3\n"
         "Camera: OV5640\n"
         "ID: " DEVICE_ID);
-    lv_obj_set_style_text_color(info, (lv_color_t){ .full = 0x07E0 }, 0);
-    lv_obj_set_style_text_font(info, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_color(info, COL_ACCENT, 0);
+    lv_obj_set_style_text_font(info, FONT_MAIN, 0);
     lv_obj_set_style_text_align(info, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(info, LV_ALIGN_TOP_MID, 0, 56);
 
     lv_obj_t* hint = lv_label_create(g_page_about);
     lv_label_set_text(hint, "長按返回主頁");
     lv_obj_set_style_text_color(hint, COL_STATUS, 0);
-    lv_obj_set_style_text_font(hint, &lv_font_cjk_tc_16, 0);
+    lv_obj_set_style_text_font(hint, FONT_MAIN, 0);
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -8);
 }
 
@@ -1133,13 +1117,13 @@ void ui_nav_event(nav_event_t ev) {
                 g_home_focus = (g_home_focus + 1) % HOME_ITEM_COUNT;
                 update_home_focus();
                 // Animate focused button
-                if (g_home_items[g_home_focus].btn) {
-                    anim_button_press(g_home_items[g_home_focus].btn);
+                if (g_home_btns[g_home_focus]) {
+                    anim_button_press(g_home_btns[g_home_focus]);
                 }
             } else if (ev == NAV_CONFIRM) {
                 // Animate button press
-                if (g_home_items[g_home_focus].btn) {
-                    anim_button_press(g_home_items[g_home_focus].btn);
+                if (g_home_btns[g_home_focus]) {
+                    anim_button_press(g_home_btns[g_home_focus]);
                 }
                 on_home_select(g_home_focus);
             }
@@ -1161,13 +1145,14 @@ void ui_nav_event(nav_event_t ev) {
 
         case UI_PAGE_SETTINGS: {
             if (ev == NAV_NEXT) {
-                // Short press: move focus. For the brightness row, bump the
-                // slider instead so a single button can still adjust it.
-                if (g_settings_focus == SET_ROW_BRIGHTNESS && g_settings_slider) {
-                    int v = lv_slider_get_value(g_settings_slider) + 40;
+                // Short press: move focus. On the brightness row, bump the
+                // brightness instead so a single button can still adjust it.
+                if (g_settings_focus == SET_ROW_BRIGHTNESS) {
+                    int v = g_brightness + 40;
                     if (v > 255) v = 10;   // wrap
-                    lv_slider_set_value(g_settings_slider, v, LV_ANIM_OFF);
-                    display_set_brightness((uint8_t)v);
+                    g_brightness = (uint8_t)v;
+                    display_set_brightness(g_brightness);
+                    settings_refresh();    // update the shown value
                 } else {
                     g_settings_focus = (g_settings_focus + 1) % SETTINGS_ROW_COUNT;
                     update_settings_focus();
@@ -1193,10 +1178,8 @@ void ui_nav_event(nav_event_t ev) {
                         settings_refresh();
                         break;
                     case SET_ROW_BRIGHTNESS:
-                        // Confirm = apply + advance focus off the slider row.
-                        if (g_settings_slider) {
-                            display_set_brightness((uint8_t)lv_slider_get_value(g_settings_slider));
-                        }
+                        // Confirm = advance focus off the brightness row (the
+                        // value is adjusted with short presses via NAV_NEXT).
                         g_settings_focus = (g_settings_focus + 1) % SETTINGS_ROW_COUNT;
                         update_settings_focus();
                         break;
@@ -1449,14 +1432,12 @@ static void ui_apply_status(void) {
     g_status_dirty = false;
     portEXIT_CRITICAL(&g_status_mux);
 
-    const lv_color_t green = { .full = 0x07E0 };
-    const lv_color_t red   = { .full = 0xF800 };
     if (g_icon_wifi) {
-        lv_obj_set_style_text_color(g_icon_wifi, wifi_ok ? green : red, 0);
+        lv_obj_set_style_text_color(g_icon_wifi, wifi_ok ? COL_ACCENT : COL_ALERT, 0);
         lv_obj_invalidate(g_icon_wifi);   // force repaint
     }
     if (g_icon_mqtt) {
-        lv_obj_set_style_text_color(g_icon_mqtt, mqtt_ok ? green : red, 0);
+        lv_obj_set_style_text_color(g_icon_mqtt, mqtt_ok ? COL_ACCENT : COL_ALERT, 0);
         lv_obj_invalidate(g_icon_mqtt);
     }
 }
@@ -1469,10 +1450,7 @@ static void ui_apply_ble_status(void) {
     int state = !ble_hid_is_started() ? 0 : (ble_hid_is_connected() ? 2 : 1);
     if (state == s_last) return;
     s_last = state;
-    const lv_color_t grey  = { .full = 0x8410 };
-    const lv_color_t red   = { .full = 0xF800 };
-    const lv_color_t green = { .full = 0x07E0 };
-    lv_color_t c = (state == 0) ? grey : (state == 2 ? green : red);
+    lv_color_t c = (state == 0) ? COL_MUTED : (state == 2 ? COL_ACCENT : COL_ALERT);
     lv_obj_set_style_text_color(g_icon_ble, c, 0);
     lv_obj_invalidate(g_icon_ble);
 }
@@ -1677,7 +1655,7 @@ void ui_process_pending_scan(void) {
                 lv_label_set_text(g_scan_lbl_stocktake, content);
             }
             if (g_inv_lbl_count) {
-                lv_label_set_text_fmt(g_inv_lbl_count, "%d barcode(s) counted",
+                lv_label_set_text_fmt(g_inv_lbl_count, "已盤點 %d 筆",
                                       g_st_entry_count);
             }
         } else if (strcmp(label, "STEnd") == 0) {
