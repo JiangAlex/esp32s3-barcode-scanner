@@ -28,10 +28,22 @@ static bool     s_trig_active = false;
 static uint32_t s_rx_bytes = 0;      // total UART bytes received (diagnostic)
 static uint32_t s_trig_start_ms = 0;
 
+// Diagnostic: count TRIG level changes while the ESP32 is NOT driving it.
+// Any edge here comes from the module side / wiring (noise, glitches),
+// including pulses far shorter than a 'g' poll could see.
+static volatile uint32_t s_idle_edges = 0;
+static void IRAM_ATTR trig_edge_isr(void) { s_idle_edges++; }
+
+// pinMode() resets the GPIO interrupt config, so re-arm after each change.
+static void trig_idle_input(void) {
+    pinMode(QR_PIN_TRIG, INPUT);
+    attachInterrupt(digitalPinToInterrupt(QR_PIN_TRIG), trig_edge_isr, CHANGE);
+}
+
 static void trig_release(void) {
     // Back to high-impedance input: the ESP32 neither drives nor pulls the
     // line; the module's own pull-up (10k to 3.3V) keeps TRIG HIGH.
-    pinMode(QR_PIN_TRIG, INPUT);
+    trig_idle_input();
     s_trig_active = false;
 }
 
@@ -40,7 +52,7 @@ void qr_scanner_init(void) {
     // trigger the ESP32 is electrically absent from the line. Only
     // qr_scanner_trigger() switches it to an open-drain output driven LOW
     // (never HIGH), so the module board's own TRIG key to GND cannot short it.
-    pinMode(QR_PIN_TRIG, INPUT);
+    trig_idle_input();
 
     s_uart.begin(QR_UART_BAUD, SERIAL_8N1, QR_UART_RX, QR_UART_TX);
     Serial.printf("[QR] QL3301L UART RX=%d TX=%d %d 8N1, TRIG=%d\n",
@@ -53,6 +65,7 @@ void qr_scanner_set_cb(qr_scan_cb_t cb) {
 }
 
 void qr_scanner_trigger(void) {
+    detachInterrupt(digitalPinToInterrupt(QR_PIN_TRIG));   // our own edge, not noise
     pinMode(QR_PIN_TRIG, OUTPUT_OPEN_DRAIN);   // output only while triggering
     digitalWrite(QR_PIN_TRIG, LOW);
     s_trig_active = true;
@@ -98,8 +111,9 @@ bool qr_scanner_poll(void) {
 }
 
 void qr_scanner_debug(void) {
-    Serial.printf("[QR] diag: TRIG(GPIO%d) level=%d driving_low=%d | RX(GPIO%d) level=%d | uart_rx_bytes=%lu\n",
+    Serial.printf("[QR] diag: TRIG(GPIO%d) level=%d driving_low=%d idle_edges=%lu | RX(GPIO%d) level=%d | uart_rx_bytes=%lu\n",
                   QR_PIN_TRIG, digitalRead(QR_PIN_TRIG), s_trig_active ? 1 : 0,
+                  (unsigned long)s_idle_edges,
                   QR_UART_RX, digitalRead(QR_UART_RX), (unsigned long)s_rx_bytes);
 }
 
