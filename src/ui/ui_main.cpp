@@ -493,6 +493,8 @@ static void show_page(ui_page_t page) {
             anim_page_slide_in(g_page_settings);
             break;
         case UI_PAGE_INVENTORY:
+            ui_preview_stop();                     // camera preview off, TRIG released
+            qr_scanner_set_cb(on_preview_decode);  // QL3301L scans -> stocktake
             lv_obj_clear_flag(g_page_inventory, LV_OBJ_FLAG_HIDDEN);
             g_at_home = false;
             anim_page_slide_in(g_page_inventory);
@@ -1128,16 +1130,19 @@ void ui_nav_event(nav_event_t ev) {
     if (ev == NAV_NONE) return;
 
     if (ev == NAV_SCAN) {
-        // Hold > 1 s: trigger one scan. Only meaningful on the SCAN page
-        // (scans on other pages are dropped by ui_process_pending_scan).
+        // Hold > 1 s: trigger one scan (SCAN / INVENTORY pages only).
+        // GPIO18 (QL3301L TRIG) is only driven on the SCAN and INVENTORY
+        // pages; everywhere else it stays released.
         if (g_current_page == UI_PAGE_SCAN) {
 #if HAS_UART_SCANNER
             qr_scanner_trigger();
 #elif HAS_CAMERA
             scan_preview_request_hires();
 #endif
+        } else if (g_current_page == UI_PAGE_INVENTORY) {
+            qr_scanner_trigger();          // stocktake scan from the 盤點 page
         } else {
-            Serial.println("[UI] NAV_SCAN ignored (not on SCAN page)");
+            Serial.println("[UI] NAV_SCAN ignored (only SCAN / INVENTORY)");
         }
         return;
     }
@@ -1742,6 +1747,21 @@ void ui_process_pending_scan(void) {
     portEXIT_CRITICAL(&g_scan_mux);
 
     // Only surface scans while the SCAN page is active.
+    if (g_current_page == UI_PAGE_INVENTORY) {
+        if (!g_st_active || g_st_session_id == 0) {
+            if (g_inv_lbl_status) lv_label_set_text(g_inv_lbl_status, "切換至盤點模式開始");
+            Serial.printf("[UI] stocktake scan ignored (no session): %s\n", content);
+            return;
+        }
+        scan_mode_t saved = g_scan_mode;   // INVENTORY always scans as STOCKTAKE
+        g_scan_mode = SCAN_MODE_STOCKTAKE;
+        ui_on_scan(type, content);
+        g_scan_mode = saved;
+        if (g_inv_lbl_count) {
+            lv_label_set_text_fmt(g_inv_lbl_count, "已盤點 %d 筆", g_st_entry_count);
+        }
+        return;
+    }
     if (g_current_page != UI_PAGE_SCAN) return;
 
     ui_on_scan(type, content);
