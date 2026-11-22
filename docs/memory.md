@@ -2474,11 +2474,42 @@ slider，屬 Phase A 刻意設計。使用者要求兩頁統一。來回確認�
 
 ## 已知限制 / 待辦
 
-- **決定由 ESP32 控制 TRIG**（2026-11-22）：GPIO18（Touch-LCD-2 排針 pin 23）接模組 PIN12 TRIG。韌體改為**開汲極 + 內部上拉**（commit e6e02c1），ESP32 只會拉低、不主動推高，避免與模組板上 TRIG 按鍵（按下接地）互相短路；兩種觸發可並存。SCAN 頁短按 → 拉低最長 5 s，收到一行即放開。
+- **決定由 ESP32 控制 TRIG**（2026-11-22）：GPIO18（Touch-LCD-2 排針 pin 23）接模組 PIN12 TRIG。韌體先改為**開汲極 + 內部上拉**（commit e6e02c1），後因雜訊問題改為**閒置推挽 HIGH**（commit e6842c2，見下方「TRIG 雜訊與閒置狀態」）。SCAN 頁短按 → 拉低最長 5 s，收到一行即放開。
 - **ESP32 控制 TRIG 實機成功（2026-11-22，Touch-LCD-2）**：模組 TRIG 量測 3.3V（KEY 上拉），直接接 pin 23（GPIO18）。serial `x`（NAV_SCAN）→ +1.6 s `[QR] trigger`（GPIO18 level=0）→ +5.8 s `[QR] scan: 2609021KN7BSHN`（uart_rx_bytes=15，含 CR）→ TRIG 立即放開（level=1）。
 - 只在 **SCAN 頁與盤點頁**驅動 GPIO18（commit a91ee21）；其他頁按住 1 s 會印 `NAV_SCAN ignored`。盤點頁掃到的碼以 STOCKTAKE 處理（需已開盤點 session）。
-- **BOOT 鍵對應**（commit 5110f28）：放開 < 300 ms = NAV_NEXT；300 ms–1 s = NAV_CONFIRM；按住到 1 s = NAV_SCAN（觸發掃描）；按住到 3 s = NAV_HOME。hold 事件觸發後放開不再送 NEXT / CONFIRM。serial `x` = NAV_SCAN、`g` = 腳位診斷（TRIG / RX / BOOT 電位 + UART byte 數）。
+- **BOOT 鍵對應**（commit 5110f28，f5a12ac 修正）：放開 < 300 ms = NAV_NEXT；≥ 300 ms 放開 = NAV_CONFIRM；按住到 1 s = NAV_SCAN（**僅 SCAN / 盤點頁**）；按住到 3 s = NAV_HOME。hold 事件觸發後放開不再送 NEXT / CONFIRM。serial `x` = NAV_SCAN、`g` = 腳位診斷（TRIG / RX / BOOT 電位 + UART byte 數）。
 - **踩雷**：第一次接 TRIG 後 GPIO0（BOOT）一直讀 0 → BOOT 鍵失效（螢幕無法選擇）、模組一直閃。拔線後恢復；確認 TRIG 為 3.3V 後接回同一 pin 23 即正常，原因未明（推測首次接線接觸不良或碰到鄰腳）。再出現「螢幕無法選擇」先用 `g` 看 GPIO0。
+
+### TRIG 雜訊與閒置狀態（2026-11-22，Touch-LCD-2）
+
+- **現象**：TRIG 線接著時，模組 LED 在首頁也一直閃（ESP32 沒有觸發）；拔掉 TRIG 線就不閃。
+- **量測**：首頁每 0.2 s 讀 `g` 共 60 次，GPIO18 全為 1、`driving_low` 全為 0（ESP32 沒拉低）。加中斷邊沿計數（`idle_edges`，commit dc17884）後，GPIO18 為高阻抗輸入時 **12 s 內多 53 次邊沿（約 2 脈衝/s）**，脈衝短到輪詢讀不到 0。開機 WiFi 重試期間累積最多（255 次），推測為 WiFi 射頻 / 串擾耦合到只有模組 10 kΩ 上拉的高阻抗 TRIG 線（未用示波器確認）。
+- **閒置狀態演進**：
+  1. 推挽輸出 HIGH（初版，TRIG 未接線時）
+  2. 開汲極 + 內部上拉（e6e02c1）：避免按模組 KEY 時短路 → 模組仍閃
+  3. 高阻抗 INPUT，只在觸發時切開汲極輸出（8b29059）→ 模組仍閃，確認 ESP32 沒驅動，雜訊來自線上
+  4. **推挽輸出 HIGH（e6842c2，目前）**：主動把線拉住，雜訊脈衝進不來。編譯旗標 `QR_TRIG_IDLE_DRIVE_HIGH`（預設 1；設 0 回到第 3 種並啟用 `idle_edges` 計數）。觸發時輸出 LOW，讀到碼或 5 s 逾時回到 HIGH。
+- **實機結果**：第 4 種是否消除閃爍**待使用者確認**。
+- **⚠ 短路風險與 1 kΩ 串聯電阻**：閒置推挽 HIGH 時按下模組板上的 TRIG KEY（按下接地）會讓 GPIO18 直接短路到 GND。要同時保留 KEY，在 TRIG 線**中間串 1 kΩ**（470 Ω–1 kΩ 皆可，不接 VCC / GND），靠近 Touch-LCD-2 排針 pin 23：
+
+  ```
+  ESP32 GPIO18 (pin 23) ──[ 1 kΩ ]── 模組 TRIG ──┬── KEY ── GND
+                                                 └── 10 kΩ ── 3.3V（模組板上）
+  ```
+
+  | 情況 | 結果 |
+  |------|------|
+  | GPIO18 HIGH + 按 KEY | 電流限制為 3.3 V / 1 kΩ = 3.3 mA，安全；KEY 照常觸發 |
+  | GPIO18 LOW（ESP32 觸發） | 1 kΩ / 10 kΩ 分壓，TRIG ≈ 0.3 V，仍為低電位 |
+  | GPIO18 HIGH（閒置） | TRIG ≈ 3.3 V，仍被拉住，可擋雜訊 |
+
+  **目前尚未串電阻**：使用時不要按模組 KEY。
+- 其他硬體選項（未採用）：TRIG–GND 加 100 nF（原廠參考電路有）、TRIG–3.3V 加 4.7 kΩ 強上拉。
+
+### 「進不去掃描頁面」（2026-11-22）
+
+- **原因**：5110f28 的規則在**所有頁面**按住 1 s 都送 NAV_SCAN 並吞掉放開事件。首頁長按想進「掃描」時常超過 1 s → NAV_SCAN 被忽略（log `[UI] NAV_SCAN ignored` ×5）、放開也不送 CONFIRM，所以進不去。
+- **修正**（f5a12ac）：只有 SCAN / 盤點頁會在 1 s 送 NAV_SCAN；其他頁長按放開（< 3 s）一律是 NAV_CONFIRM。serial 驗證 `c` 可進 SCAN 頁、`x` 可觸發；實體 BOOT 鍵**待使用者確認**。
 - PHOTO 頁在 LCD-2.8 仍出現在首頁選單（原本就是空殼，且該板無相機）。
 - QL3301L 供電：專案記 5V，原廠手冊為 3.3V；實測模組 TX 為 3.3V 準位（#141）。
 - `docs/QL3301/` 兩份 PDF 僅在 ThinkPad 工作區，未入版控。

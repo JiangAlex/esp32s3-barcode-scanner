@@ -79,11 +79,13 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 |------------------------------|----------|------------------|--------------------|
 | PIN5 UART_TXD | GPIO44（RX） | pin 4 RXD | RXD |
 | PIN4 UART_RXD | GPIO43（TX） | pin 3 TXD | TXD |
-| PIN12 TRIG | GPIO18 | pin 23 | IO18 |
+| PIN12 TRIG | GPIO18（建議串 1 kΩ） | pin 23 | IO18 |
 | PIN2 VCC | 5V | pin 15 | VBus |
 | PIN3 / PIN8 GND | GND | pin 2 / 13 / 16 | GND |
 
 > 序列埠 log 走 USB-CDC，所以 GPIO43/44（UART0）可給模組用（`Serial1`）。
+>
+> TRIG 由 ESP32 控制：GPIO18 閒置時推挽輸出 HIGH（擋雜訊），觸發時輸出 LOW；只有 SCAN 頁與盤點頁會觸發（按住 BOOT 1 秒）。⚠ 沒串電阻時不要按模組板上的 TRIG KEY（會讓 GPIO18 短路到 GND）；要保留 KEY，在 TRIG 線中間串 **1 kΩ**（詳見 [docs/memory.md](docs/memory.md)「TRIG 雜訊與閒置狀態」）。
 
 ### Waveshare ESP32-S3-Touch-LCD-2（`lcd2`）
 
