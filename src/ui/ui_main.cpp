@@ -1158,11 +1158,12 @@ void ui_nav_event(nav_event_t ev) {
                 // Short press triggers one high-resolution (SVGA) scan. A QUERY
                 // hit now switches to the standalone RESULT page, so there is
                 // no longer an in-place "result shown" state on this page.
-                // On camera-less boards it triggers the QL3301L module instead.
-#if HAS_CAMERA
-                scan_preview_request_hires();
-#elif HAS_UART_SCANNER
-                qr_scanner_trigger();
+                // With a QL3301L module, short press triggers the module instead
+                // (the camera live preview keeps decoding QR in the background).
+#if HAS_UART_SCANNER
+                qr_scanner_trigger();          // QL3301L: 1D + 2D
+#elif HAS_CAMERA
+                scan_preview_request_hires();  // camera-only boards
 #endif
             } else if (ev == NAV_CONFIRM) {
                 // Long press = cycle scan mode (QUERY → INPUT → IN → OUT → COUNT).
@@ -1633,7 +1634,8 @@ void ui_preview_start(void) {
 #if HAS_CAMERA
     scan_preview_set_decode_cb(on_preview_decode);
     scan_preview_start(0, 0, 0, 0);  // geometry is fixed internally
-#elif HAS_UART_SCANNER
+#endif
+#if HAS_UART_SCANNER
     qr_scanner_set_cb(on_preview_decode);
 #endif
 }
@@ -1641,7 +1643,8 @@ void ui_preview_start(void) {
 void ui_preview_stop(void) {
 #if HAS_CAMERA
     scan_preview_stop();
-#elif HAS_UART_SCANNER
+#endif
+#if HAS_UART_SCANNER
     qr_scanner_set_cb(nullptr);
 #endif
 }

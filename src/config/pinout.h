@@ -102,10 +102,22 @@
 
 #define HAS_CAMERA          1
 #define HAS_TOUCH           1
-#define HAS_UART_SCANNER    0
+#define HAS_UART_SCANNER    1       // QL3301L on the header (see QR_* below)
 #define SD_USE_MMC          0
 #define HAS_PWR_LATCH       0
 #define TFT_BUS_SHARED      true    // LCD shares SPI bus with SD card
+
+// ─── QL3301L scan module (UART on the 28-pin header) ────────────────────────
+// Header (Waveshare "Interface Introduction"): pin 3 TXD = GPIO43,
+// pin 4 RXD = GPIO44, pin 23 = GPIO18, pin 15 = 5V, pin 16 / 13 / 2 = GND.
+// Module PIN5 UART_TXD -> GPIO44, PIN4 UART_RXD <- GPIO43, PIN12 TRIG <- GPIO18.
+// Serial (log) is USB-CDC, so UART0's pins are free for Serial1.
+// WARNING: ESP32-S3 GPIOs are NOT 5V tolerant; check the module TX level.
+
+#define QR_UART_RX          44
+#define QR_UART_TX          43
+#define QR_PIN_TRIG         18
+#define QR_UART_BAUD        9600
 
 /*
  * Original header for this board:
@@ -216,7 +228,7 @@
 
 // GPIO19, GPIO20 — USB OTG (D-, D+)
 // GPIO26-32      — PSRAM (Octal SPI, internal to ESP32-S3R8 module)
-// GPIO43, GPIO44 — UART0 TXD/RXD (Serial debug)
+// GPIO43, GPIO44 — UART0 TXD/RXD: used by the QL3301L (Serial1); log is USB-CDC
 
 #endif /* BOARD_LCD28 */
 
