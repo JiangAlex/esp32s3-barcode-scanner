@@ -34,10 +34,27 @@ static uint32_t s_trig_start_ms = 0;
 static volatile uint32_t s_idle_edges = 0;
 static void IRAM_ATTR trig_edge_isr(void) { s_idle_edges++; }
 
-// pinMode() resets the GPIO interrupt config, so re-arm after each change.
+// Idle state of TRIG.
+//  QR_TRIG_IDLE_DRIVE_HIGH = 1: push-pull HIGH. Holds the line firmly so RF /
+//    crosstalk noise cannot create short LOW pulses that the module takes as
+//    triggers (seen on Touch-LCD-2: ~2 pulses/s on a high-Z TRIG, module LED
+//    kept blinking). Do NOT press the module's own TRIG key in this mode (it
+//    would short GPIO18 to GND) unless a series resistor (~1k) is fitted.
+//  QR_TRIG_IDLE_DRIVE_HIGH = 0: high-Z INPUT, edge counter armed (diagnostic).
+#ifndef QR_TRIG_IDLE_DRIVE_HIGH
+#define QR_TRIG_IDLE_DRIVE_HIGH 1
+#endif
+
 static void trig_idle_input(void) {
+#if QR_TRIG_IDLE_DRIVE_HIGH
+    digitalWrite(QR_PIN_TRIG, HIGH);
+    pinMode(QR_PIN_TRIG, OUTPUT);
+    digitalWrite(QR_PIN_TRIG, HIGH);
+#else
+    // pinMode() resets the GPIO interrupt config, so re-arm after each change.
     pinMode(QR_PIN_TRIG, INPUT);
     attachInterrupt(digitalPinToInterrupt(QR_PIN_TRIG), trig_edge_isr, CHANGE);
+#endif
 }
 
 static void trig_release(void) {
@@ -65,9 +82,13 @@ void qr_scanner_set_cb(qr_scan_cb_t cb) {
 }
 
 void qr_scanner_trigger(void) {
+#if QR_TRIG_IDLE_DRIVE_HIGH
+    digitalWrite(QR_PIN_TRIG, LOW);            // already a push-pull output
+#else
     detachInterrupt(digitalPinToInterrupt(QR_PIN_TRIG));   // our own edge, not noise
     pinMode(QR_PIN_TRIG, OUTPUT_OPEN_DRAIN);   // output only while triggering
     digitalWrite(QR_PIN_TRIG, LOW);
+#endif
     s_trig_active = true;
     s_trig_start_ms = millis();
     Serial.println("[QR] trigger");
