@@ -89,11 +89,16 @@ bool qr_scanner_poll(void) {
     return delivered;
 }
 
+bool qr_scanner_is_triggering(void) {
+    return s_trig_active;
+}
+
 #else  // !HAS_UART_SCANNER — no-op stubs so callers need no #if
 
 void qr_scanner_init(void) {}
 void qr_scanner_set_cb(qr_scan_cb_t) {}
 void qr_scanner_trigger(void) {}
 bool qr_scanner_poll(void) { return false; }
+bool qr_scanner_is_triggering(void) { return false; }
 
 #endif
