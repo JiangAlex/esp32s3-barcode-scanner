@@ -28,13 +28,18 @@ static bool     s_trig_active = false;
 static uint32_t s_trig_start_ms = 0;
 
 static void trig_release(void) {
-    digitalWrite(QR_PIN_TRIG, HIGH);
+    digitalWrite(QR_PIN_TRIG, HIGH);   // open-drain: HIGH = released (pulled up)
     s_trig_active = false;
 }
 
 void qr_scanner_init(void) {
-    pinMode(QR_PIN_TRIG, OUTPUT);
-    digitalWrite(QR_PIN_TRIG, HIGH);   // idle: not triggering
+    // TRIG is driven open-drain with the internal pull-up: the ESP32 only ever
+    // pulls it LOW, never drives it HIGH. The module board also has its own
+    // TRIG button to GND (QL3301L 集成手册 3.3.1: 10k pull-up + key to GND),
+    // so a push-pull HIGH would short the GPIO when that button is pressed.
+    // Open-drain lets both trigger sources coexist.
+    digitalWrite(QR_PIN_TRIG, HIGH);   // latch "released" before enabling output
+    pinMode(QR_PIN_TRIG, OUTPUT_OPEN_DRAIN | PULLUP);
 
     s_uart.begin(QR_UART_BAUD, SERIAL_8N1, QR_UART_RX, QR_UART_TX);
     Serial.printf("[QR] QL3301L UART RX=%d TX=%d %d 8N1, TRIG=%d\n",
