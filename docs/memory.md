@@ -1,3 +1,564 @@
+# ESP32-S3 Barcode Scanner — 專案記憶（memory）
+
+> 本檔合併自原 `memory.md`（根目錄，硬體 / 規格筆記）與 `docs/memory.md`（逐次 session 開發紀錄），2026-11-22 整理。
+> 第 1–3 部分為規格與硬體摘要；第 4 部分為 session 紀錄（依時間順序，原文保留）。
+> 規格摘要與後續 session 結論不一致時，以 session 紀錄為準，並以「🔄 後續更新」標註。
+
+## 目錄
+
+1. 功能規格（掃描模式 / UI / BLE HID / 拍照 AI / 離線暫存 / MQTT）
+2. 硬體平台（目前：微雪 ESP32-S3-Touch-LCD-2 + QL3301 掃描模組）
+3. 原始硬體（已淘汰：ESP32-S3-DevKitC-1 + OV2640 + ILI9341 + 搖桿）
+4. Session 開發紀錄（2026-09-21 起）
+
+---
+
+# 1. 功能規格
+
+## 功能架構摘要
+
+### 掃描模式
+
+| 模式 | 行為 |
+|------|------|
+| 🔍 查詢 | 掃描 → MQTT 查詢 server → 顯示品項完整資訊 |
+| 📤 輸入 (BLE HID) | 掃描 → 模擬鍵盤打字至游標位置（通用，任何程式）|
+| 📤 輸入 (MQTT) | 掃描 → 推送至 Web UI 欄位 |
+| 📋 盤點 | 連續掃描累積 → 批次上傳 server |
+
+### UI 頁面
+
+首頁(列表) → 掃描(3模式) / 拍照辨識 / 設定
+
+### 設計原則
+
+- ESP32 不負責建立品項（中文輸入由 Server Web UI 處理）
+- ESP32 只做：掃描查詢、無線輸入、盤點、拍照上傳
+- UI 支援中英文即時切換 (i18n)
+- 觸控不啟用，純搖桿 + 按鍵導航
+- BLE 裝置名稱：SoftSnail
+
+> 🔄 **後續更新**：「觸控不啟用，純搖桿 + 按鍵導航」為原始硬體時期的設計。換板後曾改用觸控，但 CST816 實測硬體不通（見 Session 2026-10-04），目前為單鍵導航（見 Session 2026-10-20 Phase A）。
+
+## BLE HID — 無線條碼槍
+
+- **功能**：ESP32-S3 模擬 BLE HID 鍵盤，掃描條碼後直接「打字」到任何裝置的游標位置
+- **BLE 版本**：Bluetooth 5.0 (BLE)
+- **裝置名稱**：`SoftSnail`（可由使用者在設定頁面修改）
+- **Library**：ESP32-BLE-Keyboard
+- **配對方式**：PC/手機端主動搜尋配對，ESP32 只負責廣播
+- **後綴選項**：Enter / Tab / None（掃描值送出後自動附加）
+- **WiFi + BLE 共存**：ESP32-S3 支援同時運作 ✅
+
+### BLE 狀態
+
+| 狀態 | 說明 |
+|------|------|
+| 廣播中 | 等待 PC/手機搜尋配對 |
+| 已連線 | 已配對，可送出鍵盤輸入 |
+| 已關閉 | 不廣播，省電 |
+
+> 🔄 **後續更新**：實作改用 NimBLE-Arduino 自寫薄層 HID（非 ESP32-BLE-Keyboard）；BLE 槍模式會暫停 WiFi/MQTT（單一 radio + DRAM 限制），見 Session 2026-10-21。
+
+## 拍照 AI 辨識
+
+- **功能**：拍照傳至 server，AI OCR 辨識包裝上的品名/規格/料號，自動填入品項單據
+- **拍照解析度**：SVGA (800×600) 或 UXGA (1600×1200)
+- **圖片格式**：JPEG（OV2640 硬體編碼，不佔 CPU）
+- **傳輸方式**：HTTP POST multipart/form-data
+- **圖片大小**：SVGA ~30-80KB、UXGA ~80-200KB
+- **Server 端**：FastAPI 接收 → AI API (GPT-4o / Gemini Vision) → 回傳結構化資料
+- **注意**：拍照時需從 Grayscale QVGA 切換至 JPEG SVGA/UXGA，Camera reinit
+
+## 離線暫存與工作日誌
+
+### 離線暫存
+
+- WiFi 斷線時，掃描結果存入 SD 卡佇列：`/sd/cache/pending.json`
+- 恢復連線後自動背景同步
+- 同步完成刪除暫存檔
+
+### 工作日誌
+
+- 自動記錄所有操作（掃描/盤點/拍照）
+- 檔案格式：JSON Lines
+- 路徑：`/sd/logs/YYYY-MM-DD.jsonl`
+- 記錄內容：時間、操作類型、條碼、結果狀態
+
+### SD 卡目錄結構
+
+```
+/sd/
+├── logs/
+│   ├── 2026-07-30.jsonl    ← 工作日誌
+│   └── ...
+├── cache/
+│   └── pending.json        ← 離線暫存佇列
+└── res/
+    └── (UI 圖片資源)
+```
+
+> 🔄 **後續更新**：此卡 `SD.mkdir` 失敗，工作日誌改為根目錄扁平檔；離線暫存同步只做 IN/OUT 逐筆 replay，見 Session 2026-10-20 (續2) 與 2026-10-21 (pending)。
+
+## MQTT Protocol
+
+### Topics
+
+| Topic | Publisher | Subscriber |
+|-------|-----------|------------|
+| `warehouse/query` | ESP32 | Server |
+| `warehouse/scan-input/{device_id}` | ESP32 | Server |
+| `warehouse/inventory/{device_id}` | ESP32 | Server |
+| `warehouse/response/{device_id}` | Server | ESP32 |
+
+### Query Payload
+
+```json
+{"barcode": "4710088123456", "device_id": "esp32-001"}
+```
+
+### Scan Input Payload (推送至 Web UI)
+
+```json
+{"value": "4710088123456", "device_id": "esp32-001", "timestamp": "2026-07-30T14:20:00"}
+```
+
+### Inventory Payload (盤點清單上傳)
+
+```json
+{
+  "device_id": "esp32-001",
+  "timestamp": "2026-07-30T14:30:00",
+  "items": [
+    {"barcode": "4710088123456", "quantity": 3},
+    {"barcode": "8801234567890", "quantity": 1}
+  ]
+}
+```
+
+### Response Payload
+
+```json
+{
+  "status": "found",
+  "data": {
+    "barcode": "4710088123456",
+    "name": "電阻 10kΩ",
+    "spec": "0805 1/8W",
+    "quantity": 500,
+    "location": "A-01-03",
+    "supplier": "大毅科技",
+    "date_in": "2026-07-20T10:00:00"
+  }
+}
+```
+
+> 🔄 **後續更新**：韌體與 server 契約已對齊（P1–P3），見 Memory — MQTT Contract Alignment (2026-10-06..07)。
+
+---
+
+# 2. 硬體平台（目前）
+
+## ⚡ 硬體平台變更記錄 (2026-08-24)
+
+> 原始硬體：ESP32-S3-DevKitC-1 (N16R8) + 外接 OV2640 + 外接 2.8" ILI9341 TFT + 搖桿
+> 新硬體：**微雪 ESP32-S3-Touch-LCD-2** 一體板
+
+### 新硬體 — 微雪 ESP32-S3-Touch-LCD-2
+
+#### 規格
+
+- ESP32-S3R8: 16MB Flash, 8MB PSRAM
+- 2" IPS 240×320, ST7789T3 (SPI)
+- CST816D 電容觸控 (I2C)
+- OV5640 相機 (24Pin FPC, 相容 OV2640)
+- TF 卡槽 (SPI)
+- QMI8658 6-axis IMU (I2C)
+- 3.7V 鋰電池充放電
+- USB Type-C
+- 22 GPIO 可用
+
+#### Camera GPIO (已確認)
+
+| Signal | GPIO |
+|--------|------|
+| PWDN | 17 |
+| RESET | -1 |
+| XCLK | 8 |
+| SIOD (SDA) | 21 |
+| SIOC (SCL) | 16 |
+| D0 (Y2) | 12 |
+| D1 (Y3) | 13 |
+| D2 (Y4) | 15 |
+| D3 (Y5) | 11 |
+| D4 (Y6) | 14 |
+| D5 (Y7) | 10 |
+| D6 (Y8) | 7 |
+| D7 (Y9) | 2 |
+| VSYNC | 6 |
+| HREF | 4 |
+| PCLK | 9 |
+
+#### LCD / Touch / SD / IMU GPIO (✅ 已從官方 Demo 原始碼確認)
+
+> 已下載官方 Demo ZIP 並從原始碼交叉驗證，詳細見 PORTING.md（檔案目前不存在於 repo）
+
+| Module | Signal | GPIO |
+|--------|--------|------|
+| **LCD (ST7789T3, SPI)** | DC / CS / SCLK / MOSI / MISO / RST / BL | 42 / 45 / 39 / 38 / 40 / -1 / 1 |
+| **SD Card (TF, SPI)** | SCLK / MOSI / MISO / CS | 39 / 38 / 40 / 41 |
+| **Touch (CST816D, I2C)** | SDA / SCL / INT / RST | 48 / 47 / -1 / -1（addr 0x15）|
+| **IMU (QMI8658, I2C)** | SDA / SCL | 48 / 47（addr 0x6B）|
+| **Battery** | ADC | 5 |
+
+- ⚠️ **LCD 與 SD 共用同一 SPI bus**（SCLK=39/MOSI=38/MISO=40），僅 CS 分開（LCD=45, SD=41）→ 需 CS 分時管理
+- Touch 與 IMU 共用同一 I2C bus（SDA=48/SCL=47）
+- 官方 Library：LCD=GFX_Library_for_Arduino v1.5.0（或改 LovyanGFX Panel_ST7789）、Touch=bsp_cst816、IMU=FastIMU v1.2.6
+
+#### 官方 Demo 使用的 Libraries
+
+| Library | 用途 | 版本 |
+|---------|------|------|
+| GFX_Library_for_Arduino | LCD 驅動 (Arduino_ST7789) | v1.5.0 |
+| lvgl | GUI | v8.4.0 |
+| FastIMU | QMI8658 IMU | v1.2.6 |
+| bsp_cst816 | CST816D 觸控 | 離線安裝 |
+
+#### 移除的硬體
+
+- 5-way Joystick（改用觸控）
+- Buzzer（新板無板載，可外接）
+- Status LED（新板無板載）
+
+#### 設計決策
+
+1. **保留 LovyanGFX**：將 Panel_ILI9341 改為 Panel_ST7789，設定 `invert=true`，比換 Arduino_GFX 改動更少
+2. **觸控取代搖桿**：LVGL tabview 原生支援觸控，UI 邏輯改動最小
+3. **OV5640 相容**：esp_camera 庫同時支援 OV2640/OV5640，pin config 相同格式
+4. **解析度不變**：240×320 相同，UI layout 完全不需修改
+
+> 🔄 **後續更新**：Board Status 記為 N8R8 標籤、PSRAM 8MB OPI（見 Session 2026-09-22 根因 #1）；CST816 觸控判定硬體故障（Session 2026-10-04）。
+
+## 🔍 掃描來源：二維碼掃描模組 QL3301L (2026-11-22)
+
+- **決策**：掃描（scan）使用外接 **二維碼掃描模組 QL3301L**（賣家標示 QL3301），由模組本身完成 1D/2D 解碼，ESP32 只接收解碼後的字串。
+- **影響**：掃描不再依賴板載相機（OV5640 + quirc 解碼）。不含相機介面的板子（例如 **Waveshare ESP32-S3-LCD-2.8**）也能做掃描查詢 / 輸入 / 盤點。
+- **介面**：**TTL-232 串口（UART）**（使用者確認，2026-11-22）。接線與端到端驗證追蹤：Redmine #141。⚠ **出廠預設為 USB-HID 輸出**，必須先切到「TTL-232 串口模式」UART 才會有資料（見下方「首次設定」）。
+- **供電**：**+5V**（使用者指定，2026-11-22）。
+
+### 資料來源
+
+| 文件 | 位置 | 內容 |
+|------|------|------|
+| `QL3301L集成手册.pdf`（V1.0.0，2025.07，19 頁） | repo `docs/QL3301/`（目前在 ThinkPad 工作區，尚未 commit） | 模組參數、12PIN 腳位、TRIG / BEEP / DLED 參考電路、通訊介面、安裝與光學 |
+| `小模块配置手册_V2.0.3.pdf`（深圳市芯码电子，2022.06，168 頁） | 同上 | 串口指令協定、標志位（暫存器）表、設定碼 |
+| 賣家說明書圖 `…2207309346180~183.jpg` | ThinkPad `~/Downloads/` | 與集成手冊內容相同（規格表、腳位、TRIG、DLED） |
+| [MCMI 產品頁](https://www.wcmiscan.com/wcmi-qr-barcode-reader-mini-barcode-scanner-module-ql3301-oem-odm-mcmi.html) | 網路 | 規格（與手冊大致相同） |
+| [淘寶商品 id=994288619688](https://item.taobao.com/item.htm?id=994288619688) | 網路（需登入，未讀取） | 購買來源 |
+
+> ⚠ **電壓衝突**：集成手冊、說明書圖、產品頁都寫 **VCC +3.3V DC ±5%**（PIN2「輸入 +3.3V」）。本專案依使用者指定以 **+5V** 記錄；若所購模組沒有 5V 轉 3.3V 的轉接板，直接接 5V 可能損壞模組，通電前請再確認。
+
+### 規格（QL3301L 集成手冊 表 2-1）
+
+| 項目 | 規格 |
+|------|------|
+| 感測器 | 640×480 CMOS |
+| 光源 | 白光補光 LED / 紅光 LED 瞄準 |
+| 視角 | 水平 32°、垂直 24° |
+| 介面 | **TTL-UART**、USB-KBW / POS / VCP |
+| 識讀提示 | BEEP（PIN9，無源蜂鳴器 PWM）、DLED（PIN10，指示燈）；兩腳空閒為低電平 |
+| 工作電壓 | **+5V**（使用者指定）；手冊原文 +3.3V DC ±5% |
+| 電流（UART 模式） | 工作 ≤ 174 mA、待機 ≤ 55 mA、休眠 ≤ 1 mA |
+| 電流（USB 模式） | 工作 ≤ 175 mA、待機 ≤ 55 mA |
+| 尺寸 / 重量 | 21.5 × 12.7 × 11.5 mm（長×寬×高；說明書圖寫 21.5 × 11.00 × 12.20）、< 10 g |
+| 識讀模式 | 手動（**出廠預設，電平觸發**）、命令觸發、感應、連續 |
+| 精度 | 1D ≥ 4 mil、2D ≥ 10 mil；符號反差 ≥ 10% |
+| 識讀景深 | EAN-13（13 mil）70–315 mm；Code128（15 mil）75–410 mm；Code39（5 mil）45–125 mm；QR（15 mil）45–240 mm |
+| 識讀角度 | 旋轉 360°、傾斜 ±60°、偏轉 ±60° |
+| 2D 碼制 | QR（Mode1/2）、MicroQR、Data Matrix、PDF417、MicroPDF417、Aztec、HanXin、Maxicode、Code 16K |
+| 1D 碼制 | Code128、Code39、Code93、EAN13、EAN8、UPC-E(E0,E1)、ISBN13、Interleaved/Industrial/Matrix/Standard 2 of 5、GS1 DataBar 系列、Codabar、MSI Plessey、Code 11、Plessey、ChinaPost 2 of 5 |
+| 複合碼 | GS1 Composite |
+| 環境 | 工作 -20 ~ 60 °C、儲存 -40 ~ 70 °C、5–95% RH（不凝結） |
+| 可靠性 | 震動 5–200 Hz / 10 Grms / 3 軸 / 1.5 Hr；1.2 m 跌落水泥地；熱衝擊 -20 ~ 60 °C 各 30 分、24 週期 |
+| 安裝 | 底部 4 個定位孔，Ø1.35 mm，用 M1.7 自攻螺絲；窗片（PC / 玻璃 / PMMA，1 mm）與模組前端距離 ≤ 0.5 mm 並平行 |
+
+> 說明書圖（…180.jpg）與產品頁的電流為工作 ≤ 165 mA、待機 ≤ 99 mA，景深也不同；以 2025.07 集成手冊為準。
+
+### 連接器腳位（集成手冊 表 3-1）
+
+標準 **12PIN FPC 連接器，PIN 間距 0.5 mm**。需用一條**兩端皆 12PIN、0.5 mm 間距的同面（直連）柔性排線**（排線寬 6.5 mm、厚 0.3 mm）。模組絲印 `QM3301_V12`，模組上白點所在的一端為 PIN1。
+
+| PIN | 引腳 | 說明 |
+|-----|------|------|
+| 1 | TEST1 | 內部測試腳，外部懸空 |
+| 2 | VCC | 電源輸入（本專案記為 +5V；手冊原文 +3.3V） |
+| 3 | GND | 地 |
+| 4 | UART_RXD | 模組 TTL-232 **接收**（接 ESP32 TX） |
+| 5 | UART_TXD | 模組 TTL-232 **發送**（接 ESP32 RX） |
+| 6 | USB_D- | USB DN |
+| 7 | USB_D+ | USB DP |
+| 8 | GND | 地 |
+| 9 | BEEP | 無源蜂鳴器 PWM，空閒低電平；不可直接驅動蜂鳴器 |
+| 10 | DLED | 指示燈控制，空閒低電平；解碼成功輸出約 **300 ms 高電平脈衝**；不可直接驅動 LED |
+| 11 | TEST2 | 內部測試腳，外部懸空 |
+| 12 | TRIG | 掃碼觸發輸入，**低電平或下降沿有效** |
+
+### 參考電路（集成手冊 3.3）
+
+- **TRIG（PIN12）**：低電平 / 下降沿開始識讀；讀到碼即輸出並停止，「單次讀碼時長」內沒讀到也停止；**每次都要重新觸發**。電路：TRIG —100 Ω— 節點；節點 10 kΩ 上拉、100 nF 對地、TVS 對地、按鍵對地。ESP32 可用 GPIO 經 100 Ω 接 TRIG，平時高、拉低觸發。
+- **BEEP（PIN9）**：輸出 PWM，需外接驅動電路（三極體）推蜂鳴器。
+- **DLED（PIN10）**：NPN 驅動：DLED —1 kΩ— 基極（基極 10 kΩ 對地），集極接 LED + 1 kΩ 到 VCC，射極接地。也可接 ESP32 GPIO 輸入當「解碼成功」信號，資料仍以 UART 為準。
+
+### 串口通訊（配置手冊 第一部分）
+
+- **預設串口參數**：**9600 bps、8 資料位、無校驗、1 停止位、無流控**（8N1）。
+- **掃碼輸出**：預設為**純資料輸出**（0x0060 Bit7 = 0；帶協定格式為 `03 {長度} {資料}`），**預設結束符 CR（0x0D）**；可改 CRLF / TAB / 無。
+- **指令格式**（主機 → 模組）：`7E 00 {Type} {Lens} {Address 2B} {Datas} {CRC 2B}`
+  - Type：`0x07` 讀標志位、`0x08` 寫標志位、`0x09` 保存 / 恢復出廠
+  - CRC：CRC-CCITT（多項式 0x1021、初值 0、MSB first、不取反），範圍為 Type ~ Datas；**填 `AB CD` 可免校驗**
+  - 回應：`02 00 {Type} {Lens} {Datas} {CRC}`，寫成功固定為 `02 00 00 01 00 33 31`；CRC 錯或未知命令**無回應**
+  - 兩位元組間隔超過 400 ms 視為未知命令
+  - 寫標志位斷電即失效，需再送保存命令：`7E 00 09 01 00 00 00 DE C8`
+  - 恢復出廠：`7E 00 09 01 00 00 FF C0 38`（CRC 依手冊演算法算出，已用手冊範例驗證演算法）
+- **常用標志位**：
+
+| 位址 | 位元 | 功能 |
+|------|------|------|
+| 0x0000 | Bit1-0 | 識讀模式：00 手動、01 命令觸發、10 連續、11 感應 |
+| 0x0000 | Bit7 / Bit6 | 解碼成功 LED 提示開關 / 靜音 |
+| 0x0001 | Bit5 | 手動模式觸發方式：0 電平、1 邊沿 |
+| 0x0001 | Bit7 | 命令觸發應答：0 應答、1 不應答 |
+| 0x0002 | Bit0 | **命令觸發：寫 1 開始讀碼**，掃描結束自動清零 |
+| 0x0006 | Bit7-0 | 單次讀碼時長：0x00 無限長、其餘 ×100 ms（設定碼預設 5000 ms） |
+| 0x0007-0x0008 | | 自動深度休眠開關與空閒時長（單位 100 ms）；**僅手動模式 + TTL-232 輸出時有效**，可用按鍵或串口指令喚醒 |
+| 0x000D | Bit1-0 | **輸出端口**：00 串口、01 USB-HID（出廠）、10 串口 & HID、11 USB 虛擬串口 |
+| 0x000D | Bit3-2 | 輸出編碼：00 GBK、01 UNICODE、10 原資料、11 UTF8 |
+| 0x002A-0x002B | Bit12-0 / Bit14-13 | 鮑率除數（0x0139 = 9600、0x001A = 115200）/ 校驗（00 無、01 奇、10 偶） |
+| 0x0060 | Bit0 / Bit6-5 / Bit7 | 結束符開關 / 結束符類型（00 CR、01 CRLF、10 TAB、11 無）/ 串口輸出帶協定 |
+
+- **命令觸發範例**：`7E 00 08 01 00 02 01 02 DA`（寫 0x0002 = 0x01；免校驗版 `… 01 AB CD`）。需先把 0x0000 Bit1-0 設為 01（命令觸發模式）。⚠ 尚未實測。
+
+### 首次設定（模組到手後）
+
+1. 出廠為 **USB-HID** 輸出，UART 沒有資料。用模組掃配置手冊 2.1.1 的「**TTL-232 串口模式**」設定碼（第 40 頁）切到串口。也可用 USB 接電腦，以鍵盤模式確認模組能讀碼。
+2. 切到串口後，以 9600 8N1 接收；掃一個條碼，應收到「條碼內容 + 0x0D」。
+3. 觸發方式擇一：TRIG 腳（ESP32 GPIO 拉低）或命令觸發（寫 0x0002）。
+4. 設定需要掉電保存時，再送保存命令 `7E 00 09 01 00 00 00 DE C8`。
+
+> 配置手冊列的 HID VID/PID（KBW 0x1FC9:0x5AA7）與集成手冊（KBW 0x34EB:0x1502）不同，配置手冊是通用「小模組」文件；USB 相關以集成手冊為準。虛擬串口兩份都是 0x152A:0x880F。
+
+### 整合注意
+
+- **供電 5V**：接板子的 5V（ESP32-S3-LCD-2.8 為 12PIN 介面的 VBus，只在 USB 供電時有電；改用電池時須另找 5V 來源），不經 3.3V LDO。工作 ≤ 174 mA、待機 ≤ 55 mA；電池供電時應啟用深度休眠（≤ 1 mA）。
+- **⚠ TTL 準位**：以 5V 供電時，模組 TX 可能輸出 5V。**ESP32-S3 GPIO 不耐 5V**，接 RX 前先量模組 TX 閒置電壓；若為 5V 須加準位轉換或分壓（例如 1 kΩ / 2 kΩ）。
+- **ESP32 接線（ESP32-S3-LCD-2.8，已實作於 `env:lcd28`，commit fc93c04，尚未實機驗證）**：模組 TXD(PIN5) → ESP32 **GPIO44**（RX）、RXD(PIN4) ← **GPIO43**（TX）、TRIG(PIN12) ← **GPIO18**，皆在 12PIN 介面上；`Serial1` 9600 8N1（`src/input/qr_scanner.cpp`，腳位見 `src/config/pinout.h` 的 `QR_*`）。log 走 USB-CDC，不佔 UART0。
+  - SCAN 頁短按 → TRIG 拉低（最長 5 s，讀到碼即放開）；收到以 CR/LF 結尾的一行 → `on_preview_decode`，與相機解碼走同一條流程。
+  - lcd28 不編譯相機、預覽、quirc / 1D 解碼器與觸控；SD 改用 SD_MMC 1-bit（CLK 14 / CMD 17 / D0 16 / D3 21）；開機將 GPIO7 拉高保持電池供電。
+  - **實機驗證（2026-11-22，ThinkPad + LCD-2.8，未接 QL3301L）**：使用者確認螢幕正常開機顯示 UI。開機 log：I2C 掃到 0x51（PCF85063 RTC）、0x6B（QMI8658，ID=0x05 OK）、0x7E（未知）；`[DISPLAY] init done`；SD_MMC 掛載 SDHC 3807 MB、write-commit OK、工作日誌讀取正常；`[QR] QL3301L UART RX=44 TX=43 9600 8N1, TRIG=18`；WiFi portal、BLE HID、按鍵導航皆正常。SCAN 頁短按印出 `[QR] trigger`，5 s 後 `trigger timeout (no code read)`（未接模組，符合預期）。**掃碼端到端尚未驗證**（待接上 QL3301L 並切到 TTL-232 模式）。
+  - **電源鎖存與燒錄注意（LCD-2.8）**：USB 供電也經過 GPIO7 鎖存。Waveshare 出廠範例開機會先拉低 GPIO7，沒按住 PWR 鍵約 1 s 就斷電；要燒錄時需**按住 BOOT 再插 USB** 進下載模式。本韌體開機即拉高 GPIO7，之後插 USB 即可常駐。esptool 的「Hard resetting via RTS」會放開 GPIO7 導致斷電（需重插）；pyserial **DTR 由低→高**則觸發 `USB_UART_CHIP_RESET`，板子會重開且能維持供電，可用來遠端取得開機 log。開啟序列埠時也要讓 DTR 為 True，否則韌體不輸出、也不吃 serial 指令。
+- **ESP32 接線（ESP32-S3-Touch-LCD-2，`env:lcd2`（原名 esp32s3），commit 73cc3c7）**：與 LCD-2.8 相同 GPIO。Touch-LCD-2 排針（Waveshare Interface Introduction）：pin 3 **TXD = GPIO43**、pin 4 **RXD = GPIO44**、pin 23 **GPIO18**、pin 15 **5V**、pin 2/13/16 GND。模組 TXD(PIN5) → GPIO44、RXD(PIN4) ← GPIO43、TRIG(PIN12) ← GPIO18。這三支在本板原本都未使用。
+  - SCAN 頁短按改為觸發 QL3301L（原本是相機 SVGA 精解）；相機即時預覽仍在背景解 QR，兩個來源都進 `on_preview_decode`。
+  - **實機開機（2026-11-22，ThinkPad，序號 28:84:85:87:E4:A0）**：`[QR] QL3301L UART RX=44 TX=43 9600 8N1, TRIG=18`、`[MAIN] board: ESP32-S3-Touch-LCD-2`。同次 log：QMI8658 OK；CST816 無回應（已知硬體故障）；**SD Mount failed（未插卡？）**、**Camera probe failed 0x105（ESP_ERR_NOT_FOUND，相機未接？）**；WiFi 連 D500MA 回 st=1（找不到 SSID）。掃碼端到端待接上模組驗證。
+- **硬體版本以 `platformio.ini` env 區分**：`lcd2`（預設，Touch-LCD-2；2026-11-22 由 `esp32s3` 改名）、`lcd28`（LCD-2.8，`-D BOARD_LCD28`），見 README「Build & Upload」。
+- **韌體解析**：以 0x0D 為一筆結束；設定命令回應以 `02 00` 開頭，與掃碼資料區分。
+- BEEP / DLED 可接外部驅動電路做提示，不必經 ESP32。
+- 需要 1D 條碼（EAN-13 / Code128）時，QL3301L 可取代相機掃碼；相機 1D 受鏡頭光學限制（見下方後續更新）。
+
+### 待確認
+
+- 工作電壓（使用者指定 5V，手冊寫 3.3V）與 5V 下 TX 的實際電壓
+- 命令觸發、深度休眠喚醒、保存命令的實測
+- 相機掃碼路徑（OV5640 + quirc）是否保留為備援
+
+> 🔄 **後續更新**：相機 1D 解碼受定焦 / 光學限制（Session 2026-09-27、2026-10-03），專用解碼模組方案的背景與候選見 Session 2026-10-03 (續)「1D 補救方案」（當時列 M5Stack Unit QRCode / GM65 等，未含 QL3301）。
+
+---
+
+# 3. 原始硬體（已淘汰，僅供歷史參考）
+
+> ESP32-S3-DevKitC-1 (N16R8) + 外接 OV2640 + 外接 2.8" ILI9341 TFT + 5 向搖桿 + Buzzer + LED。2026-08-24 改用微雪 ESP32-S3-Touch-LCD-2，以下腳位**不適用目前板子**（目前腳位見第 2 部分與 `src/config/pinout.h`）。
+
+## ESP32-S3 Module 資訊
+
+- **Module**: ESP32-S3-WROOM-1 N16R8
+- **Flash**: 16MB (QIO)
+- **PSRAM**: 8MB Octal SPI (佔用 GPIO26-32)
+- **CPU**: Dual-core Xtensa LX7 @ 240MHz
+- **SRAM**: 512KB
+- **USB**: OTG on GPIO19/20
+
+## Camera — OV2640
+
+### Pin 配置
+
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| XCLK | 15 | Camera clock output (20MHz) |
+| SIOD (SDA) | 4 | SCCB I2C data |
+| SIOC (SCL) | 5 | SCCB I2C clock |
+| VSYNC | 6 | Vertical sync |
+| HREF | 7 | Horizontal reference |
+| PCLK | 13 | Pixel clock input |
+| D0 | 11 | Data bit 0 |
+| D1 | 9 | Data bit 1 |
+| D2 | 8 | Data bit 2 |
+| D3 | 10 | Data bit 3 |
+| D4 | 12 | Data bit 4 |
+| D5 | 18 | Data bit 5 |
+| D6 | 17 | Data bit 6 |
+| D7 | 16 | Data bit 7 |
+| PWDN | -1 | Not connected (tie to GND externally) |
+| RESET | -1 | Not connected (software reset via SCCB) |
+
+### Camera 設定
+
+- Frame size: **QVGA (320x240)** — 適合條碼掃描
+- Pixel format: **Grayscale** — 條碼解碼只需灰階
+- Frame buffer: **PSRAM** 儲存 (fb_count=2)
+- XCLK: **20MHz**
+- 自動曝光、自動增益、較高對比度（針對條碼優化）
+
+### 注意事項
+
+- OV2640 模組排線為 24-pin FPC，確認排線方向
+- SCCB (I2C-like) 使用 GPIO4/5，不需外部上拉（模組內建）
+- 如果影像品質差，嘗試降低 XCLK 到 10MHz
+
+## TFT Display — ILI9341 / ST7789 (240x320 SPI)
+
+### Pin 配置
+
+| Signal | GPIO | SPI Bus | Notes |
+|--------|------|---------|-------|
+| MOSI | 35 | SPI2 (HSPI) | Data out to TFT |
+| SCLK | 36 | SPI2 (HSPI) | SPI clock |
+| CS | 37 | - | Chip select (active low) |
+| DC | 38 | - | Data/Command select |
+| RST | 39 | - | Hardware reset (active low) |
+| BL | 40 | LEDC CH0 | Backlight PWM (44.1kHz) |
+
+### Display 設定
+
+- Resolution: **240 x 320** pixels
+- Color depth: **16-bit RGB565**
+- SPI clock: **40MHz**
+- Byte swap: **Enabled** (big-endian for SPI)
+- Rotation: **0** (Portrait, configurable)
+- LVGL draw buffer: **PSRAM** (2x 240*40 lines)
+
+### ILI9341 vs ST7789 差異
+
+- ILI9341: `cfg.invert = false`, `cfg.rgb_order = false`
+- ST7789: `cfg.invert = true`, `cfg.rgb_order = false`
+- 切換時修改 `display.cpp` 中的 Panel class 和 config
+
+## SD Card — SPI Mode
+
+### Pin 配置
+
+| Signal | GPIO | SPI Bus | Notes |
+|--------|------|---------|-------|
+| MISO | 41 | SPI3 (VSPI) | Data in from SD |
+| MOSI | 42 | SPI3 (VSPI) | Data out to SD |
+| SCLK | 2 | SPI3 (VSPI) | SPI clock |
+| CS | 1 | - | Chip select (active low) |
+
+### SD Card 設定
+
+- SPI clock: **20MHz**
+- 與 TFT 使用 **不同 SPI bus**（TFT=SPI2, SD=SPI3），避免衝突
+- 格式: **FAT32**（SD.h 預設）
+- 目錄結構:
+  ```
+  /sd/
+  ├── logs/
+  │   └── scan_log.json    ← 掃描紀錄 (JSON Lines)
+  └── res/
+      └── (UI 圖片資源)
+  ```
+
+### 注意事項
+
+- SD 模組選擇 **3.3V** 相容版本
+- GPIO2 作為 SD SCLK：ESP32-S3 上 GPIO2 無 bootstrap 問題（不同於 ESP32）
+- GPIO1 作為 SD CS：避免與 USB boot 衝突（N16R8 使用 USB-JTAG 時注意）
+
+## Buzzer
+
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| BUZZER | 14 | LEDC CH1, PWM output |
+
+- 頻率: **2700Hz**（預設，可調）
+- 掃描成功: 100ms beep
+- 使用 LEDC PWM 驅動，duty=128（50%）
+
+## Status LED
+
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| LED | 48 | Digital output / Neopixel |
+
+- DevKitC-1 有些版本 GPIO48 接 Neopixel RGB LED
+- 簡單版本用 HIGH/LOW 控制
+
+## User Button
+
+| Signal | GPIO | Notes |
+|--------|------|-------|
+| BOOT BTN | 0 | Active LOW, 內建上拉 |
+
+- 按下 = LOW，放開 = HIGH
+- 對應 LVGL LV_KEY_ESC（返回/取消）
+- 長按 = 回首頁
+
+## Joystick — 5 方向導航搖桿
+
+| 方向 | GPIO | LVGL Key | Notes |
+|------|------|----------|-------|
+| UP | 3 | LV_KEY_UP | INPUT_PULLUP, active LOW |
+| DOWN | 21 | LV_KEY_DOWN | INPUT_PULLUP, active LOW |
+| LEFT | 33 | LV_KEY_LEFT | INPUT_PULLUP, active LOW |
+| RIGHT | 34 | LV_KEY_RIGHT | INPUT_PULLUP, active LOW |
+| PRESS | 47 | LV_KEY_ENTER | INPUT_PULLUP, active LOW |
+
+- 類型：數位 5 方向搖桿 (5-way tactile nav switch)
+- 接法：各方向接 GPIO + GND，使用內部上拉電阻
+- 防抖：軟體 debounce 20ms
+- LVGL indev type: LV_INDEV_TYPE_KEYPAD
+
+## SPI Bus 分配
+
+| Bus | Host | 用途 | Pins |
+|-----|------|------|------|
+| SPI2 | HSPI | TFT LCD | MOSI=35, SCLK=36 |
+| SPI3 | VSPI | SD Card | MISO=41, MOSI=42, SCLK=2 |
+
+> 兩個 SPI bus 完全獨立，可同時操作 TFT 和 SD Card，無需 CS 管理
+
+## PSRAM 使用
+
+- **GPIO26-32**: Octal SPI PSRAM（模組內部，不可外部使用）
+- PSRAM 用途:
+  - Camera frame buffers (2x QVGA = ~150KB)
+  - LVGL draw buffers (2x 240*40*2 = ~38KB)
+  - QR code canvas buffer
+  - JSON parsing buffers
+
+## Pin Conflict 注意事項
+
+1. **GPIO26-32**: PSRAM 佔用，絕對不可使用
+2. **GPIO19/20**: USB OTG，若需 USB 功能不可挪用
+3. **GPIO43/44**: UART0 (Serial debug)，接 USB-UART 橋接
+4. **GPIO0**: BOOT button，啟動時不可拉 LOW（除非要進入下載模式）
+5. **TFT 與 SD 在不同 SPI bus**，不會互相干擾
+6. **Camera 佔用大量 GPIO (14 pins)**，規劃時優先分配
+7. **Joystick 佔用 5 GPIO** (3/21/33/34/47)，全部使用內部上拉
+
+---
+
+# 4. Session 開發紀錄
+
 # Memory — ESP32-S3 LVGL Debug Session
 
 ## Root Causes Found
@@ -88,8 +649,8 @@ ln -sf ~/.platformio/penv/bin/pio         ~/.local/bin/pio
 ln -sf ~/.platformio/penv/bin/platformio  ~/.local/bin/platformio
 ln -sf ~/.platformio/penv/bin/piodebuggdb ~/.local/bin/piodebuggdb
 
-pio run -e esp32s3          # build
-pio run -e esp32s3 -t upload # flash
+pio run -e lcd2             # build（env 原名 esp32s3，2026-11-22 改名 lcd2）
+pio run -e lcd2 -t upload    # flash
 ```
 
 ### Serial port access (required before flashing)
@@ -1852,3 +2413,47 @@ slider，屬 Phase A 刻意設計。使用者要求兩頁統一。來回確認�
   需 **setDTR(True)** host-present 才吃 serial 輸入（nav 指令才會被收到）；此環境 `pio device
   monitor` 需互動式終端、無法在非互動 shell 跑，改用 pyserial 直接對話。
 - LCD 實際畫面無法遠端目視；以 build + 開機 log（[UI] initialized 9 頁）+ 導航無 crash 間接驗證。
+
+---
+
+# Session 2026-11-22 — QL3301L 掃描模組 + 第二硬體版本 ESP32-S3-LCD-2.8（Redmine #141）
+
+## 決策
+
+- 掃描改用外接 **QL3301L**（TTL-232 UART，模組內部解碼），取代相機 1D 解碼（定焦 / 光學限制）。規格、腳位、串口協定整理在第 2 部分「掃描來源：二維碼掃描模組 QL3301L」。
+- 硬體分兩版，以 `platformio.ini` env 區分：`lcd2`（Touch-LCD-2，預設；原名 `esp32s3`）、`lcd28`（LCD-2.8，`-D BOARD_LCD28`）。
+- 兩版 QL3301L 接線相同：RX GPIO44 / TX GPIO43 / TRIG GPIO18（Touch-LCD-2 排針 pin 4 / 3 / 23；LCD-2.8 12PIN 介面 RXD / TXD / IO18）。
+
+## 實作（commit fc93c04、73cc3c7，env 改名另見本次 commit）
+
+- `pinout.h`：依 `BOARD_LCD28` 分兩組腳位 + 功能旗標 `HAS_CAMERA` / `HAS_TOUCH` / `HAS_UART_SCANNER` / `SD_USE_MMC` / `HAS_PWR_LATCH` / `TFT_BUS_SHARED`。
+- `src/input/qr_scanner.{h,cpp}`：`Serial1` 讀行（CR/LF）、丟棄控制字元、TRIG 拉低最長 5 s；送進 `on_preview_decode`。掃到碼呼叫 `power_update_idle_time()`。
+- `ui_main.cpp`：`ui_preview_start/stop` 同時管相機（若有）與 QL3301L；SCAN 短按在有 QL3301L 時觸發模組，否則相機 SVGA 精解。
+- SD：`SD_FS` 別名（`SD` 或 `SD_MMC`），`scan_log.cpp` / `sd_card.cpp` 改用 `SD_FS.xxx()`；LCD-2.8 用 SD_MMC 1-bit、D3 拉高。
+- `display.cpp`：無相機時自行定義 `s_spi_mutex = NULL`；`HAS_TOUCH` 才註冊觸控 indev。
+- `main.cpp`：`HAS_PWR_LATCH` 開機拉高 GPIO7；相機 / 對焦序列指令以 `HAS_CAMERA` 包住（無相機時全數字行視為條碼）。
+- `lcd28` 的 `build_src_filter` 排除 `camera/`、`scan_preview.cpp`、`decoder/`、`input/touch.cpp`。
+
+## Build
+
+- `lcd2`：RAM 52.8%（172952 B）、Flash 64.2%（2019825 B）。
+- `lcd28`：RAM 49.6%（162380 B）、Flash 61.6%（1938653 B）。
+
+## 實機驗證（ThinkPad 100.123.243.29 遠端燒錄）
+
+- **LCD-2.8**（序號 B8:1F:3F:D8:A4:94）：使用者確認螢幕正常；I2C 0x51 / 0x6B / 0x7E；SD_MMC SDHC 3807 MB 掛載、write-commit OK；QR UART 初始化；按鍵、WiFi portal、BLE HID 正常；SCAN 短按 → `[QR] trigger` → 5 s `trigger timeout`（未接模組）。
+- **Touch-LCD-2**（序號 28:84:85:87:E4:A0）：`[QR] QL3301L UART RX=44 TX=43 9600 8N1, TRIG=18`、board 名稱正確；同次 SD Mount failed（卡在 LCD-2.8 上）、Camera probe failed 0x105（相機未接？）、CST816 無回應（已知）。
+- **掃碼端到端尚未驗證**：待依 Redmine #141 接上 QL3301L、切 TTL-232 模式。
+
+## 環境 / 工具備忘
+
+- 本機（ASUS-D500MA）編譯，`git push`；ThinkPad `git pull` 後用 `~/.platformio/penv/bin/pio` 燒錄（`pio` 不在 PATH）。ThinkPad 的 PlatformIO venv 已改用 Python 3.14 重建（舊版備份於 `~/.platformio/penv.bak-py312`）。
+- 本機 GitHub 認證：`gh`（`~/.local/bin/gh`，帳號 JiangAlex）+ `gh auth setup-git`。
+- 燒錄與長時間指令用 `nohup setsid ... > /tmp/xxx.log &` 在 ThinkPad 背景執行，避免 SSH 中斷遺失結果。
+- 讀 serial：pyserial 開埠後 DTR 低→高（觸發 `USB_UART_CHIP_RESET` 並讓韌體開始輸出）；LCD-2.8 不要用 RTS reset（會放開電源鎖存而斷電）。
+
+## 已知限制 / 待辦
+
+- PHOTO 頁在 LCD-2.8 仍出現在首頁選單（原本就是空殼，且該板無相機）。
+- QL3301L 供電：專案記 5V，原廠手冊為 3.3V，接線前確認（#141）。
+- `docs/QL3301/` 兩份 PDF 僅在 ThinkPad 工作區，未入版控。

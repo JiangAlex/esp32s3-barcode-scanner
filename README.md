@@ -4,8 +4,9 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 
 ## Features
 
-- **OV5640 攝影機** — 即時掃描 QR Code（quirc）與 1D 條碼 EAN-13 / UPC-A / Code128（自製 line-scan 解碼器）。低解析度標籤自動切 SVGA 800×600 單張精解提升成功率；OV5640 AF 版鏡頭支援單次對焦
-- **LVGL 圖形介面** — 2.8" TFT 240×320，BOOT 單鍵操作（觸控硬體不通），中英文 i18n 切換
+- **QL3301L 二維碼掃描模組** — 外接 UART 掃描頭（TTL-232，9600 8N1），模組內部解 1D/2D 條碼後輸出字串；SCAN 頁短按觸發。兩個硬體版本都使用
+- **OV5640 攝影機**（僅 Touch-LCD-2） — 即時掃描 QR Code（quirc）與 1D 條碼 EAN-13 / UPC-A / Code128（自製 line-scan 解碼器）。低解析度標籤自動切 SVGA 800×600 單張精解提升成功率；OV5640 AF 版鏡頭支援單次對焦
+- **LVGL 圖形介面** — 240×320 TFT（Touch-LCD-2 為 2"、LCD-2.8 為 2.8"），BOOT 單鍵操作（觸控硬體不通），中英文 i18n 切換
 - **掃描查詢模式** — 掃描條碼透過 MQTT 查詢後端倉管資料庫，顯示完整品項資訊
 - **BLE HID 無線條碼槍** — NimBLE 模擬藍牙鍵盤，掃描值直接輸出到任何電腦/手機的游標位置（US layout + Enter）。INPUT 模式按需啟動 BLE；單一 2.4GHz radio 下 BLE 期間暫停 WiFi/MQTT
 - **MQTT 輸入模式** — 推送掃描值至 Web UI 欄位
@@ -17,17 +18,30 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 
 ## Hardware
 
-| 元件 | 規格 |
+硬體有兩個版本，以 `platformio.ini` 的 env 區分（見 [Build & Upload](#build--upload)）：
+
+| 元件 | `lcd2`：ESP32-S3-Touch-LCD-2（預設） | `lcd28`：ESP32-S3-LCD-2.8 |
+|------|--------------------------------------|---------------------------|
+| 開發板 | 微雪 Waveshare 一體板，ESP32-S3R8，16MB Flash，8MB Octal PSRAM | 同左 |
+| 掃描 | **QL3301L**（UART）+ OV5640 相機即時 QR | **QL3301L**（UART） |
+| Camera | OV5640 5MP（RGB565 預覽 / 掃描；AF 版支援 VCM 對焦） | 無 |
+| Display | 2" IPS 240×320，ST7789T3，SPI（與 SD 卡共用 bus） | 2.8" 240×320，ST7789，SPI（獨立 bus） |
+| Touch | CST816D（I2C）；⚠️ 板上硬體不通 | 無（官方範例無觸控驅動） |
+| Input | BOOT button (GPIO0) 單鍵操作 | 同左 |
+| IMU / RTC | QMI8658（I2C @0x6B） | QMI8658（@0x6B）+ PCF85063 RTC（@0x51） |
+| Storage | MicroSD（SPI，與 LCD 共用 bus） | MicroSD（SD_MMC 1-bit） |
+| Battery | 鋰電池充放電（ADC GPIO5，韌體未讀取） | 鋰電池充放電（ADC GPIO8，韌體未讀取）；電源鎖存 GPIO7 |
+| Wireless | WiFi (2.4GHz) + BLE 5.0 (HID Keyboard，NimBLE)；⚠️ 單一 radio，INPUT/BLE 模式會暫停 WiFi | 同左 |
+
+### QL3301L 掃描模組
+
+| 項目 | 內容 |
 |------|------|
-| 開發板 | 微雪 Waveshare ESP32-S3-Touch-LCD-2 一體板 (ESP32-S3R8, 16MB Flash, 8MB Octal PSRAM) |
-| Camera | OV5640 5MP (RGB565 for preview/scan, SVGA 800×600 for hi-res decode；AF 版支援 VCM 對焦) |
-| Display | 2.8" TFT LCD 240×320 (ST7789T3, SPI — 與 SD 卡共用 SPI bus) |
-| Touch | CST816D 電容觸控 (I2C，與 IMU 共用 bus)；⚠️ 目前板上硬體不通，暫以 BOOT 鍵操作 |
-| Input | BOOT button (GPIO0) 單鍵操作 |
-| IMU | QMI8658 六軸 (I2C @0x6B) |
-| Storage | MicroSD Card (SPI，與 LCD 共用 bus) |
-| Battery | 鋰電池充放電管理 + ADC 電量偵測 (GPIO5) |
-| Wireless | WiFi (2.4GHz) + BLE 5.0 (HID Keyboard，NimBLE)；⚠️ 單一 radio，INPUT/BLE 模式會暫停 WiFi |
+| 介面 | TTL-232 UART，**9600 8N1**，掃碼資料以 CR（0x0D）結尾 |
+| 觸發 | TRIG 腳低電平（出廠為手動、電平觸發），單次讀碼最長 5 s |
+| 供電 | 本專案接 **5V**（⚠️ 原廠手冊寫 VCC +3.3V；ESP32-S3 GPIO 不耐 5V，接 RX 前先量模組 TX 電壓） |
+| 首次設定 | ⚠️ 出廠為 **USB-HID 輸出**，須先掃配置手冊 2.1.1「TTL-232 串口模式」設定碼（第 40 頁） |
+| 文件 | `QL3301L集成手册.pdf`、`小模块配置手册_V2.0.3.pdf`；規格、腳位、串口指令整理於 [docs/memory.md](docs/memory.md) |
 
 ## System Architecture
 
@@ -57,7 +71,21 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 | 📤 輸入 (MQTT) | 推送至 Web UI | 自動填入 Web 表單欄位 |
 | 📋 盤點 | 連續掃描累積 | 批次上傳 server |
 
-## Pin Map (Waveshare ESP32-S3-Touch-LCD-2, ESP32-S3R8)
+## Pin Map
+
+### QL3301L 接線（兩個版本相同）
+
+| QL3301L（12PIN FPC 0.5 mm） | ESP32-S3 | Touch-LCD-2 排針 | LCD-2.8 12PIN 介面 |
+|------------------------------|----------|------------------|--------------------|
+| PIN5 UART_TXD | GPIO44（RX） | pin 4 RXD | RXD |
+| PIN4 UART_RXD | GPIO43（TX） | pin 3 TXD | TXD |
+| PIN12 TRIG | GPIO18 | pin 23 | IO18 |
+| PIN2 VCC | 5V | pin 15 | VBus |
+| PIN3 / PIN8 GND | GND | pin 2 / 13 / 16 | GND |
+
+> 序列埠 log 走 USB-CDC，所以 GPIO43/44（UART0）可給模組用（`Serial1`）。
+
+### Waveshare ESP32-S3-Touch-LCD-2（`lcd2`）
 
 > 來源：`src/config/pinout.h`（對照官方 Waveshare demo 驗證）
 
@@ -75,18 +103,37 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 | **IMU (QMI8658)** | I2C addr | 0x6B |
 | **Battery** | ADC | 5 |
 | **Misc** | BOOT button | 0 |
+| **QL3301L** | RX / TX / TRIG | 44 / 43 / 18 |
 
 > ⚠️ LCD 與 SD 卡共用 SPI bus（僅 CS 不同）；Touch 與 IMU 共用 I2C bus。
-> GPIO19/20 保留給 USB OTG，GPIO26-32 保留給 Octal PSRAM，GPIO43/44 為 UART0 除錯埠。
+> GPIO19/20 保留給 USB OTG，GPIO26-32 保留給 Octal PSRAM。
 >
-> 詳細 GPIO 分配請見 [docs/gpio-map.md](docs/gpio-map.md)
+
+### Waveshare ESP32-S3-LCD-2.8（`lcd28`）
+
+> 來源：`src/config/pinout.h`（對照官方 `ESP32-S3-LCD-2.8-Demo.zip` Arduino 範例）
+
+| Module | Signal | GPIO |
+|--------|--------|------|
+| **TFT LCD (ST7789)** | SCLK / MOSI / CS / DC / RST / BL | 40 / 45 / 42 / 41 / 39 / 5 |
+| **SD Card (SD_MMC 1-bit)** | CLK / CMD / D0 / D3 | 14 / 17 / 16 / 21 |
+| **I2C (IMU + RTC)** | SDA / SCL | 11 / 10 |
+| **Power** | PWR 鍵 / 電源鎖存 | 6 / 7 |
+| **Battery** | ADC | 8 |
+| **Audio (PCM5101，未使用)** | DOUT / BCLK / LRC | 47 / 48 / 38 |
+| **Misc** | BOOT button | 0 |
+| **QL3301L** | RX / TX / TRIG | 44 / 43 / 18 |
+
+> ⚠️ LCD-2.8 的 USB 供電也經過 GPIO7 電源鎖存：板上是 Waveshare 出廠範例時，要**按住 BOOT 再插 USB** 才能燒錄；燒入本韌體後開機會自動鎖住電源。
+>
+> [docs/gpio-map.md](docs/gpio-map.md) 是最早 ESP32-S3-DevKitC-1 分體式硬體的分配表，**不適用**目前兩個版本。
 
 ## UI Pages
 
 | 頁面 | 功能 |
 |------|------|
 | 首頁 | 掃描 / 拍照辨識 / 設定（列表選單） |
-| 掃描 | Camera 預覽 + 模式切換（查詢/輸入/盤點）|
+| 掃描 | 短按觸發 QL3301L；長按切換模式（查詢/輸入/進貨/出貨/盤點）；Touch-LCD-2 另有相機預覽 |
 | 查詢結果 | 品名/規格/數量/儲位/供應商/入庫日 |
 | 盤點清單 | 累積品項列表 + 上傳 |
 | 拍照辨識 | 拍照 → 上傳 → AI OCR |
@@ -100,20 +147,20 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 
 ```
 esp32s3-barcode-scanner/
-├── platformio.ini          ← PlatformIO 設定
+├── platformio.ini          ← PlatformIO 設定（env: lcd2 / lcd28）
 ├── partitions.csv          ← Flash 分區表 (16MB)
 ├── lv_conf.h               ← LVGL 配置
 ├── src/
 │   ├── main.cpp            ← 主程式進入點
 │   ├── config/
-│   │   ├── pinout.h        ← GPIO 定義
+│   │   ├── pinout.h        ← GPIO 定義 + 功能旗標（依 BOARD_LCD28 分兩版）
 │   │   └── config.h        ← 系統設定 (WiFi/MQTT/BLE)
 │   ├── display/
 │   │   └── display.h/.cpp  ← TFT + LVGL 驅動 (LovyanGFX)
 │   ├── camera/
 │   │   └── camera.h/.cpp   ← OV5640 攝影機驅動 (RGB565 + VCM 對焦)
 │   ├── storage/
-│   │   ├── sd_card.h/.cpp  ← SD 卡 SPI 驅動
+│   │   ├── sd_card.h/.cpp  ← SD 卡驅動（lcd2: SPI / lcd28: SD_MMC，`SD_FS` 別名）
 │   │   └── scan_log.h/.cpp ← 工作日誌 + 離線暫存
 │   ├── decoder/
 │   │   └── barcode_decoder.h/.cpp ← 條碼解碼 (quirc + ZBar)
@@ -124,27 +171,39 @@ esp32s3-barcode-scanner/
 │   │   ├── ble_hid.h/.cpp        ← BLE HID 鍵盤 (NimBLE 薄層，INPUT 無線條碼槍)
 │   │   └── http_upload.h/.cpp    ← HTTP POST 圖片上傳
 │   ├── input/
-│   │   └── touch.h/.cpp          ← CST816D 觸控輸入 (⚠️ 硬體不通)
+│   │   ├── qr_scanner.h/.cpp     ← QL3301L 掃描模組 (UART 讀取 + TRIG)
+│   │   └── touch.h/.cpp          ← CST816D 觸控輸入 (⚠ 硬體不通；lcd28 不編譯)
 │   └── ui/
 │       ├── ui_main.h/.cpp        ← LVGL 頁面管理
 │       └── i18n.h/.cpp           ← 多語系字串表
 ├── docs/
 │   ├── UI-design-zh.md     ← UI 設計文件（中文）
 │   ├── UI-design-en.md     ← UI 設計文件（英文）
-│   └── gpio-map.md         ← GPIO 完整分配表
+│   ├── gpio-map.md         ← GPIO 分配表（⚠ 舊 DevKitC 硬體）
+│   └── memory.md           ← 專案記憶（規格 / 硬體 / session 紀錄）
 ├── README.md
-├── TODO.md                 ← 開發待辦事項
-└── memory.md               ← 硬體記憶文件
+└── TODO.md                 ← 開發待辦事項
 ```
 
 ## Build & Upload
 
-```bash
-# Build
-pio run
+硬體有兩個版本，由 `platformio.ini` 的 env 區分（腳位與功能旗標在 `src/config/pinout.h`，以 `-D BOARD_LCD28` 切換）：
 
-# Upload to ESP32-S3
-pio run -t upload
+| env | 硬體 | 掃碼來源 |
+|-----|------|----------|
+| `lcd2`（預設） | Waveshare ESP32-S3-Touch-LCD-2 | QL3301L（UART）+ 相機即時 QR |
+| `lcd28` | Waveshare ESP32-S3-LCD-2.8 | QL3301L（UART），無相機 / 觸控 |
+
+QL3301L 接線兩版相同：模組 TXD → GPIO44、RXD ← GPIO43、TRIG ← GPIO18（詳見 [docs/memory.md](docs/memory.md)）。
+
+```bash
+# Build（不帶 -e 時只編預設的 lcd2）
+pio run -e lcd2         # ESP32-S3-Touch-LCD-2
+pio run -e lcd28        # ESP32-S3-LCD-2.8
+
+# Upload
+pio run -e lcd2 -t upload
+pio run -e lcd28 -t upload
 
 # Serial monitor
 pio device monitor
@@ -206,6 +265,7 @@ pio device monitor
 - **2026-10-21**（Redmine #101）：SD 工作日誌接通 + 實機除錯。後端 `scan_log`/`sd_card` 原本完整但從未被 main 呼叫；接進 setup + `ui_on_scan` 每次掃描記錄 + WiFi 連線 NTP 校時。修 3 個韌體 bug（路徑重複 `/sd/sd/`、`SD.mkdir` 全失敗改扁平根目錄檔、`readString()` 回空改 size-based read）。根因級發現：2 張故障/山寨卡（寫入配置 cluster 但 size 恆 0），加開機寫入健檢自動偵測停用。換新 SDHC 卡實機驗證通過。詳見 [docs/memory.md](docs/memory.md) Session 2026-10-20。
 - **2026-10-21**（Redmine #102）：BLE HID 無線條碼槍從零實作（README 核心賣點）。NimBLE-Arduino 自寫薄層 HID keyboard（避開 T-vK lib 對 arduino-esp32 3.x 的相容債）。依序突破 5 關：編譯、WiFi/BLE 共存 abort（`esp_wifi_deinit` 釋放 WiFi）、廣播無名（`adv->setName`）、HID 連線（Just-Works IO cap）、INPUT 模式 OOM（釋放 WiFi DRAM + framebuffer 移 PSRAM）。按需啟動（進 INPUT begin / 離開 stop），狀態列 [B] 圖示。共存壓測修 2 個 crash（onDisconnect 重廣播、刪靜態 callbacks）。手機配對實機驗證：掃描值完整打進文字框。**設計取捨**：單一 radio + DRAM 限制下，BLE 槍模式暫停 WiFi/MQTT。詳見 [docs/memory.md](docs/memory.md) Session 2026-10-21。
 - **2026-10-21**：scan-input（INPUT MQTT 子通道 → Web UI 即時填欄位，跨專案）。INPUT 模式拆為 `INPUT-BLE`（無線條碼槍）/`INPUT-MQTT`（推送 Web UI）兩子通道，長按循環切換、互斥（BLE 子通道起 BLE 關 WiFi；MQTT 子通道保留 WiFi）。韌體 `mqtt_scan_input()` publish `warehouse/scan-input/{device_id}`；server（barcode-warehouse-server）以 `scan_broadcaster`（asyncio.Queue + call_soon_threadsafe）+ SSE `/web/scan-stream` 即時推送到 item 表單欄位。server 本機端到端驗證、韌體實機 publish（live broker mosquitto_sub 收到）皆通過。詳見 [docs/memory.md](docs/memory.md) Session 2026-10-21 (B)。
+- **2026-11-22**：掃描來源改為外接 **QL3301L 二維碼掃描模組**（TTL-232 UART，模組內部解碼），兩個硬體版本共用同一組 GPIO（RX 44 / TX 43 / TRIG 18）。原因：相機 1D 解碼受定焦 / 光學限制（見 2026-09-27、2026-10-03 session）。新增第二個硬體版本 **ESP32-S3-LCD-2.8**（`env:lcd28`，無相機 / 觸控，SD 改 SD_MMC）；原 Touch-LCD-2 env 由 `esp32s3` 改名 `lcd2`。兩版皆已實機開機驗證，掃碼端到端待接上模組驗證（Redmine #141）。詳見 [docs/memory.md](docs/memory.md) Session 2026-11-22。
 
 ## License
 
