@@ -2474,7 +2474,11 @@ slider，屬 Phase A 刻意設計。使用者要求兩頁統一。來回確認�
 
 ## 已知限制 / 待辦
 
-- **決定由 ESP32 控制 TRIG**（2026-11-22）：GPIO18（Touch-LCD-2 排針 pin 23）接模組 PIN12 TRIG。韌體改為**開汲極 + 內部上拉**（commit e6e02c1），ESP32 只會拉低、不主動推高，避免與模組板上 TRIG 按鍵（按下接地）互相短路；兩種觸發可並存。SCAN 頁短按 → 拉低最長 5 s，收到一行即放開。實機待驗證。
+- **決定由 ESP32 控制 TRIG**（2026-11-22）：GPIO18（Touch-LCD-2 排針 pin 23）接模組 PIN12 TRIG。韌體改為**開汲極 + 內部上拉**（commit e6e02c1），ESP32 只會拉低、不主動推高，避免與模組板上 TRIG 按鍵（按下接地）互相短路；兩種觸發可並存。SCAN 頁短按 → 拉低最長 5 s，收到一行即放開。
+- **ESP32 控制 TRIG 實機成功（2026-11-22，Touch-LCD-2）**：模組 TRIG 量測 3.3V（KEY 上拉），直接接 pin 23（GPIO18）。serial `x`（NAV_SCAN）→ +1.6 s `[QR] trigger`（GPIO18 level=0）→ +5.8 s `[QR] scan: 2609021KN7BSHN`（uart_rx_bytes=15，含 CR）→ TRIG 立即放開（level=1）。
+- 只在 **SCAN 頁與盤點頁**驅動 GPIO18（commit a91ee21）；其他頁按住 1 s 會印 `NAV_SCAN ignored`。盤點頁掃到的碼以 STOCKTAKE 處理（需已開盤點 session）。
+- **BOOT 鍵對應**（commit 5110f28）：放開 < 300 ms = NAV_NEXT；300 ms–1 s = NAV_CONFIRM；按住到 1 s = NAV_SCAN（觸發掃描）；按住到 3 s = NAV_HOME。hold 事件觸發後放開不再送 NEXT / CONFIRM。serial `x` = NAV_SCAN、`g` = 腳位診斷（TRIG / RX / BOOT 電位 + UART byte 數）。
+- **踩雷**：第一次接 TRIG 後 GPIO0（BOOT）一直讀 0 → BOOT 鍵失效（螢幕無法選擇）、模組一直閃。拔線後恢復；確認 TRIG 為 3.3V 後接回同一 pin 23 即正常，原因未明（推測首次接線接觸不良或碰到鄰腳）。再出現「螢幕無法選擇」先用 `g` 看 GPIO0。
 - PHOTO 頁在 LCD-2.8 仍出現在首頁選單（原本就是空殼，且該板無相機）。
 - QL3301L 供電：專案記 5V，原廠手冊為 3.3V；實測模組 TX 為 3.3V 準位（#141）。
 - `docs/QL3301/` 兩份 PDF 僅在 ThinkPad 工作區，未入版控。
