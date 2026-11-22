@@ -106,7 +106,7 @@
 
 /* Themes */
 #define LV_USE_THEME_DEFAULT    1
-#define LV_THEME_DEFAULT_DARK   0
+#define LV_THEME_DEFAULT_DARK   0       // light base so unstyled parts match ui_theme.h (light) palette
 
 /* Layouts */
 #define LV_USE_FLEX             1
