@@ -25,7 +25,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "config/config.h"
+#include "config/pinout.h"   // HAS_CAMERA / HAS_UART_SCANNER
 #include "scan_preview.h"
+#include "input/qr_scanner.h"
 #include "display/display.h"
 #include "network/mqtt_client.h"
 #include "network/wifi_manager.h"
@@ -1156,7 +1158,12 @@ void ui_nav_event(nav_event_t ev) {
                 // Short press triggers one high-resolution (SVGA) scan. A QUERY
                 // hit now switches to the standalone RESULT page, so there is
                 // no longer an in-place "result shown" state on this page.
+                // On camera-less boards it triggers the QL3301L module instead.
+#if HAS_CAMERA
                 scan_preview_request_hires();
+#elif HAS_UART_SCANNER
+                qr_scanner_trigger();
+#endif
             } else if (ev == NAV_CONFIRM) {
                 // Long press = cycle scan mode (QUERY → INPUT → IN → OUT → COUNT).
                 ui_cycle_scan_mode();
@@ -1618,15 +1625,25 @@ void ui_on_scan(const char* type_name, const char* content) {
     }
 }
 
-// ─── Camera Preview ──────────────────────────────────────────────────────────
+// ─── Camera Preview / scan source ────────────────────────────────────────────
+// Start/stop the scan source for the SCAN page. Both sources deliver decoded
+// text through on_preview_decode, so everything downstream is identical.
 
 void ui_preview_start(void) {
+#if HAS_CAMERA
     scan_preview_set_decode_cb(on_preview_decode);
     scan_preview_start(0, 0, 0, 0);  // geometry is fixed internally
+#elif HAS_UART_SCANNER
+    qr_scanner_set_cb(on_preview_decode);
+#endif
 }
 
 void ui_preview_stop(void) {
+#if HAS_CAMERA
     scan_preview_stop();
+#elif HAS_UART_SCANNER
+    qr_scanner_set_cb(nullptr);
+#endif
 }
 
 // Drain a pending decode result (called from the LVGL task on Core 1).

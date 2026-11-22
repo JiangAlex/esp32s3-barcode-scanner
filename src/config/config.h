@@ -55,7 +55,7 @@
                                     // (official demo uses 1=landscape; we keep
                                     //  portrait to preserve the 240x320 UI)
 #define DISP_INVERT         true    // ST7789T3 IPS panel needs color inversion
-#define DISP_BUS_SHARED     true    // LCD shares SPI bus with SD card
+#define DISP_BUS_SHARED     TFT_BUS_SHARED  // per board, see pinout.h
 
 // ─── Camera Settings (OV5640, compatible with OV2640) ───────────────────────
 

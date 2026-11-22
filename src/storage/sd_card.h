@@ -7,6 +7,18 @@
 #define SD_CARD_H
 
 #include <Arduino.h>
+#include "config/pinout.h"
+
+// Filesystem object for the TF card: SPI (SD) or SD_MMC 1-bit, per board.
+// Both expose the same fs::FS API (open/remove/exists/mkdir) plus cardType /
+// cardSize / usedBytes, so callers use SD_FS.xxx() regardless of the bus.
+#if SD_USE_MMC
+#include <SD_MMC.h>
+#define SD_FS SD_MMC
+#else
+#include <SD.h>
+#define SD_FS SD
+#endif
 
 /**
  * @brief Initialize SD card on SPI bus.

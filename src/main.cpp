@@ -22,7 +22,10 @@
 #include "ui/ui_main.h"
 #include "storage/nvs_settings.h"
 #include "power.h"
+#if HAS_CAMERA
 #include "camera/camera.h"
+#endif
+#include "input/qr_scanner.h"
 #include "input/touch.h"
 #include "network/wifi_portal/wifi_portal.h"
 #include "network/wifi_manager.h"   // C-style status helpers (wifi_is_connected, etc.)
@@ -278,6 +281,14 @@ void setup() {
     // so digitalRead() without pinMode() can latch HIGH permanently.
     pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
 
+#if HAS_PWR_LATCH
+    // Battery power hold (ESP32-S3-LCD-2.8): drive HIGH as early as possible
+    // so the board stays on when running from the Li-ion battery. On USB power
+    // the latch has no effect.
+    pinMode(PIN_PWR_LATCH, OUTPUT);
+    digitalWrite(PIN_PWR_LATCH, HIGH);
+#endif
+
     Serial.begin(115200);
     delay(200);  // wait for CDC enumeration
     Serial.println("=== SETUP ===");
@@ -330,12 +341,19 @@ void setup() {
     // ─── LVGL UI (single-button navigation) ────────────────────────────────────
     ui_main_init();
 
+#if HAS_CAMERA
     // Initialize camera AFTER LVGL is set up
     if (!camera_init()) {
         Serial.println("[MAIN] Camera init FAILED");
     } else {
         Serial.println("[MAIN] Camera init OK");
     }
+#endif
+#if HAS_UART_SCANNER
+    // External QL3301L scan module (replaces the camera on this board).
+    qr_scanner_init();
+#endif
+    Serial.printf("[MAIN] board: %s\n", BOARD_HW_NAME);
 
     // ── Network: captive-portal WiFi + MQTT ─────────────────────────────────
     // g_wifi.begin() auto-connects from saved EEPROM config, or opens the
@@ -408,17 +426,23 @@ void loop() {
                 for (size_t i = 0; i < s_len; i++) {
                     if (s_line[i] < '0' || s_line[i] > '9') { all_digits = false; break; }
                 }
+#if HAS_CAMERA
                 if (all_digits) {
                     int v = atoi(s_line);
                     if (v > 1023) v = 1023;
                     camera_af_set_manual((uint16_t)v);
                     Serial.printf("[FOCUS] VCM=%u (set)\n", (unsigned)v);
-                } else {
+                } else
+#else
+                (void)all_digits;   // no camera: digit-only lines are barcodes (EAN/UPC)
+#endif
+                {
                     // Treat as a barcode: inject into the scan pipeline.
                     Serial.printf("[SERIAL] inject barcode: %s\n", s_line);
                     ui_inject_scan("SERIAL", s_line);
                 }
                 s_len = 0;
+#if HAS_CAMERA
             } else if (s_len == 0 && (c == '+' || c == '=' || c == '-' || c == 'p')) {
                 // Single-char focus command (only when no line is in progress).
                 if (c == 'p') {
@@ -434,6 +458,7 @@ void loop() {
                     camera_af_set_manual(v);
                     Serial.printf("[FOCUS] VCM=%u (nearer)\n", v);
                 }
+#endif
             } else if (s_len == 0 && (c == 'n' || c == 'c' || c == 'h')) {
                 // Single-char navigation command (emulates the BOOT key over
                 // serial, for testing without physical access):
@@ -508,6 +533,13 @@ void loop() {
             // Reset so we don't fire HOME again while still holding
             g_btn_was_pressed = false;
         }
+    }
+
+    // ── QL3301L scan module ─────────────────────────────────────────────────
+    // Reads decoded lines from the UART and releases TRIG on success/timeout.
+    // A delivered scan counts as user activity (wakes a dimmed screen).
+    if (qr_scanner_poll()) {
+        power_update_idle_time();
     }
 
     // Keep the screen fully awake while scanning — the SCAN page is an active

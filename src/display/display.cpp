@@ -11,6 +11,13 @@
 #include "input/touch.h"
 #include "scan_preview.h"  // for s_spi_mutex extern declaration
 
+#if !HAS_CAMERA
+// scan_preview.cpp (which normally owns this LCD/SD bus lock) is not built on
+// camera-less boards. Nothing creates it there, so it stays NULL and the
+// flush / SD lock helpers skip locking (the LCD has its own bus on LCD-2.8).
+SemaphoreHandle_t s_spi_mutex = NULL;
+#endif
+
 // ─── LovyanGFX Panel Configuration ─────────────────────────────────────────
 
 class LGFX : public lgfx::LGFX_Device {
@@ -111,6 +118,7 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
 
 // ─── LVGL touch (pointer) input callback ────────────────────────────────────
 
+#if HAS_TOUCH
 static lv_indev_drv_t indev_drv;
 
 static void lvgl_touch_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
@@ -124,6 +132,7 @@ static void lvgl_touch_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
         data->state = LV_INDEV_STATE_RELEASED;
     }
 }
+#endif  // HAS_TOUCH
 
 // ─── LVGL tick source (esp_timer every 2 ms) ────────────────────────────────
 // lv_conf.h sets LV_TICK_CUSTOM 0, so LVGL needs an external tick. This is the
@@ -175,6 +184,7 @@ void display_init(void) {
     // lvgl_touch_cb simply reports RELEASED every cycle — harmless. The indev
     // is registered here as the single source of truth so touch works as soon
     // as the hardware is repaired/replaced, with no further code changes.
+#if HAS_TOUCH
     if (touch_init(TFT_WIDTH, TFT_HEIGHT, DISP_ROTATION)) {
         lv_indev_drv_init(&indev_drv);
         indev_drv.type = LV_INDEV_TYPE_POINTER;
@@ -182,6 +192,7 @@ void display_init(void) {
         indev_drv.read_cb = lvgl_touch_cb;
         lv_indev_drv_register(&indev_drv);
     }
+#endif
 
     // Start the LVGL tick (esp_timer, 2 ms). Required because LV_TICK_CUSTOM=0.
     const esp_timer_create_args_t tick_args = {

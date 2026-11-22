@@ -1,5 +1,115 @@
 /**
  * @file pinout.h
+ * @brief Board GPIO pin definitions + board capability flags.
+ *
+ * Select the board with a build flag (see platformio.ini):
+ *   (default)       Waveshare ESP32-S3-Touch-LCD-2   [env:esp32s3]
+ *   -D BOARD_LCD28  Waveshare ESP32-S3-LCD-2.8       [env:lcd28]
+ *
+ * Capability flags (0/1), defined per board below:
+ *   HAS_CAMERA        on-board OV5640 camera + live-preview decoding
+ *   HAS_TOUCH         CST816 capacitive touch on the shared I2C bus
+ *   HAS_UART_SCANNER  external QL3301L scan module on a UART (decoded text)
+ *   SD_USE_MMC        TF card on SD_MMC 1-bit (else SPI, shared with LCD)
+ *   HAS_PWR_LATCH     battery power-hold GPIO must be driven HIGH at boot
+ *   TFT_BUS_SHARED    LCD SPI bus shared with the SD card
+ */
+
+#ifndef PINOUT_H
+#define PINOUT_H
+
+#if defined(BOARD_LCD28)
+// ═══════════════════════════════════════════════════════════════════════════
+// Waveshare ESP32-S3-LCD-2.8 (ESP32-S3R8, 16MB flash, 8MB OPI PSRAM)
+// Source: official demo ESP32-S3-LCD-2.8-Demo.zip, Arduino/examples/
+//         LVGL_Arduino (Display_ST7789.h, I2C_Driver.h, SD_Card.h, PWR_Key.h,
+//         BAT_Driver.h, Audio_PCM5101.h), verified 2026-11-22.
+// No camera, no touch panel driver in the demo. Scanning comes from an external
+// QL3301L module over UART (docs/memory.md "掃描來源：QL3301L").
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define BOARD_HW_NAME       "ESP32-S3-LCD-2.8"
+
+#define HAS_CAMERA          0
+#define HAS_TOUCH           0
+#define HAS_UART_SCANNER    1
+#define SD_USE_MMC          1
+#define HAS_PWR_LATCH       1
+#define TFT_BUS_SHARED      false   // LCD has its own SPI; SD is on SD_MMC
+
+// ─── Board ──────────────────────────────────────────────────────────────────
+
+#define PIN_BOOT_BTN        0       // BOOT button (active LOW)
+#define PIN_PWR_KEY         6       // PWR button input (active LOW), not used for nav
+#define PIN_PWR_LATCH       7       // Battery power hold: HIGH = stay on
+
+// ─── TFT LCD (ST7789, SPI — dedicated bus) ──────────────────────────────────
+
+#define TFT_PIN_SCLK        40
+#define TFT_PIN_MOSI        45
+#define TFT_PIN_MISO        -1      // write-only
+#define TFT_PIN_CS          42
+#define TFT_PIN_DC          41
+#define TFT_PIN_RST         39
+#define TFT_PIN_BL          5       // Backlight (PWM)
+
+#define TFT_WIDTH           240
+#define TFT_HEIGHT          320
+#define TFT_SPI_FREQ        40000000   // demo uses 80MHz; 40MHz is the safe default
+#define TFT_BL_PWM_CH       0
+
+// ─── SD Card (TF, SD_MMC 1-bit) ─────────────────────────────────────────────
+
+#define SD_PIN_CLK          14
+#define SD_PIN_CMD          17
+#define SD_PIN_D0           16
+#define SD_PIN_D3           21      // driven HIGH before mount (demo SD_D3_EN)
+
+// ─── I2C bus (IMU QMI8658 + RTC PCF85063) ───────────────────────────────────
+
+#define I2C_SHARED_SDA      11
+#define I2C_SHARED_SCL      10
+#define I2C_FREQ            100000
+
+#define IMU_I2C_ADDR        0x6B
+
+// ─── QL3301L scan module (UART on the 12PIN header) ─────────────────────────
+// Module PIN5 UART_TXD -> ESP32 RX, PIN4 UART_RXD <- ESP32 TX,
+// PIN12 TRIG <- ESP32 GPIO (active LOW; module default = manual, level trigger).
+// The module must first be switched from its factory USB-HID output to
+// TTL-232 serial output (config manual 2.1.1 setting code).
+// WARNING: ESP32-S3 GPIOs are NOT 5V tolerant. If the module runs at 5V and its
+// TX idles at 5V, add a level shifter / divider on QR_UART_RX.
+
+#define QR_UART_RX          44      // 12PIN header RXD (GPIO44)
+#define QR_UART_TX          43      // 12PIN header TXD (GPIO43)
+#define QR_PIN_TRIG         18      // 12PIN header IO18
+#define QR_UART_BAUD        9600    // module default 9600 8N1
+
+// ─── Battery ────────────────────────────────────────────────────────────────
+
+#define BAT_ADC_PIN         8
+
+// ─── Reserved (DO NOT USE) ──────────────────────────────────────────────────
+// GPIO19/20 USB D-/D+; GPIO26-32 PSRAM; GPIO38/47/48 PCM5101 I2S (LRC/DOUT/BCLK)
+
+#else
+// ═══════════════════════════════════════════════════════════════════════════
+// Waveshare ESP32-S3-Touch-LCD-2 (default board, original pinout below)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#define BOARD_HW_NAME       "ESP32-S3-Touch-LCD-2"
+
+#define HAS_CAMERA          1
+#define HAS_TOUCH           1
+#define HAS_UART_SCANNER    0
+#define SD_USE_MMC          0
+#define HAS_PWR_LATCH       0
+#define TFT_BUS_SHARED      true    // LCD shares SPI bus with SD card
+
+/*
+ * Original header for this board:
+ * @file pinout.h
  * @brief Waveshare ESP32-S3-Touch-LCD-2 (ESP32-S3R8) GPIO Pin Definitions
  *
  * Pin allocation for: OV5640 Camera, ST7789T3 TFT LCD (SPI), SD Card (SPI),
@@ -15,8 +125,6 @@
  *       Touch (CST816D) and IMU (QMI8658) SHARE the same I2C bus (SDA=48, SCL=47).
  */
 
-#ifndef PINOUT_H
-#define PINOUT_H
 
 // ─── Board ──────────────────────────────────────────────────────────────────
 
@@ -109,5 +217,7 @@
 // GPIO19, GPIO20 — USB OTG (D-, D+)
 // GPIO26-32      — PSRAM (Octal SPI, internal to ESP32-S3R8 module)
 // GPIO43, GPIO44 — UART0 TXD/RXD (Serial debug)
+
+#endif /* BOARD_LCD28 */
 
 #endif /* PINOUT_H */

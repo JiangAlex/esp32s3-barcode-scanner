@@ -4,7 +4,6 @@
  */
 
 #include "scan_log.h"
-#include <SD.h>
 #include <ArduinoJson.h>
 #include "sd_card.h"
 #include "config/config.h"
@@ -244,10 +243,10 @@ void scan_log_remove_pending(uint32_t idx) {
     }
 
     // Overwrite file with new content
-    SD.remove(path);
+    SD_FS.remove(path);
     if (new_content.length() > 0) {
         // Write back using sd_card_write_file (truncate + rewrite)
-        File f = SD.open(path, FILE_WRITE);
+        File f = SD_FS.open(path, FILE_WRITE);
         if (f) {
             f.print(new_content);
             f.close();
@@ -265,7 +264,7 @@ void scan_log_clear(void) {
 
     char path[64];
     log_file_path(path, sizeof(path));
-    SD.remove(path);
+    SD_FS.remove(path);
     _total_count = 0;
     Serial.println("[LOG] Today's log cleared");
 }
@@ -323,9 +322,9 @@ uint32_t scan_log_sync_pending(void) {
     }
 
     // Rewrite the pending file with only the lines we could not send.
-    SD.remove(path);
+    SD_FS.remove(path);
     if (kept.length() > 0) {
-        File f = SD.open(path, FILE_WRITE);
+        File f = SD_FS.open(path, FILE_WRITE);
         if (f) { f.print(kept); f.flush(); f.close(); }
     }
     _pending_count = keptCount;
