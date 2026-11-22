@@ -122,19 +122,6 @@ static lv_obj_t* g_page_inventory_list = nullptr;
 static lv_obj_t* g_page_photo = nullptr;
 static lv_obj_t* g_page_log = nullptr;
 static lv_obj_t* g_page_about = nullptr;
-static lv_obj_t* g_page_test = nullptr;
-
-// TEST page state (widgets built in create_test_page)
-#define TEST_HISTORY_N   3     // previous scans shown under the current one
-
-static lv_obj_t* g_test_lbl_status  = nullptr;
-static lv_obj_t* g_test_lbl_barcode = nullptr;
-static lv_obj_t* g_test_lbl_meta    = nullptr;
-static lv_obj_t* g_test_lbl_history = nullptr;
-static uint32_t  g_test_count = 0;
-static bool      g_test_waiting = false;    // trigger sent, no result yet
-static char      g_test_hist[TEST_HISTORY_N][24] = {{0}};
-
 
 static ui_page_t g_current_page = UI_PAGE_HOME;
 
@@ -150,7 +137,6 @@ typedef enum {
     HOME_ITEM_SCAN = 0,
     HOME_ITEM_INVENTORY,
     HOME_ITEM_SETTINGS,
-    HOME_ITEM_TEST,
     HOME_ITEM_ABOUT,
     HOME_ITEM_COUNT
 } home_item_t;
@@ -357,10 +343,6 @@ static void create_result_page(void);
 static void create_inventory_list_page(void);
 static void create_log_page(void);
 static void create_about_page(void);
-static void create_test_page(void);
-static void test_page_on_scan(const char* type, const char* content);
-static void test_page_poll(void);
-static void test_page_trigger(void);
 static void settings_refresh(void);
 static void update_settings_focus(void);
 static void log_render(void);
@@ -433,12 +415,11 @@ void ui_main_init(void) {
     create_photo_page();
     create_log_page();
     create_about_page();
-    create_test_page();
 
     // Start at home
     show_page(UI_PAGE_HOME);
 
-    Serial.println("[UI] initialized: HOME / SCAN / RESULT / SETTINGS / INVENTORY / INV-LIST / PHOTO / LOG / ABOUT / TEST");
+    Serial.println("[UI] initialized: HOME / SCAN / RESULT / SETTINGS / INVENTORY / INV-LIST / PHOTO / LOG / ABOUT");
 }
 
 // ─── Show/hide page ───────────────────────────────────────────────────────────
@@ -453,7 +434,6 @@ static void hide_all_pages(void) {
     if (g_page_photo)          lv_obj_add_flag(g_page_photo, LV_OBJ_FLAG_HIDDEN);
     if (g_page_log)            lv_obj_add_flag(g_page_log, LV_OBJ_FLAG_HIDDEN);
     if (g_page_about)          lv_obj_add_flag(g_page_about, LV_OBJ_FLAG_HIDDEN);
-    if (g_page_test)           lv_obj_add_flag(g_page_test, LV_OBJ_FLAG_HIDDEN);
 }
 
 static void show_page(ui_page_t page) {
@@ -558,16 +538,6 @@ static void show_page(ui_page_t page) {
             g_at_home = false;
             anim_page_slide_in(g_page_about);
             break;
-        case UI_PAGE_TEST:
-            ui_preview_stop();                     // camera preview off (it paints over LVGL)
-            qr_scanner_set_cb(on_preview_decode);  // QL3301L lines -> pending scan
-            lv_obj_clear_flag(g_page_test, LV_OBJ_FLAG_HIDDEN);
-            g_at_home = false;
-            g_test_waiting = false;
-            lv_label_set_text(g_test_lbl_status, "等待掃描");
-            lv_obj_set_style_text_color(g_test_lbl_status, COL_WARN, 0);
-            anim_page_slide_in(g_page_test);
-            break;
         default:
             break;
     }
@@ -588,7 +558,6 @@ static void create_home_page(void) {
         [HOME_ITEM_SCAN]      = "掃描",
         [HOME_ITEM_INVENTORY] = "盤點",
         [HOME_ITEM_SETTINGS]  = "設定",
-        [HOME_ITEM_TEST]      = "測試",
         [HOME_ITEM_ABOUT]     = "關於"
     };
 
@@ -614,9 +583,6 @@ static void on_home_select(int8_t idx) {
             break;
         case HOME_ITEM_SETTINGS:
             show_page(UI_PAGE_SETTINGS);
-            break;
-        case HOME_ITEM_TEST:
-            show_page(UI_PAGE_TEST);
             break;
         case HOME_ITEM_ABOUT:
             show_page(UI_PAGE_ABOUT);
@@ -1155,116 +1121,6 @@ static void create_about_page(void) {
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -8);
 }
 
-// ─── TEST page (scan test) ────────────────────────────────────────────────────
-// Shows every scan exactly as received (type, length, content) plus a short
-// history. It bypasses ui_on_scan(): nothing is logged, queried or sent, so it
-// is safe for checking the QL3301L wiring / output format. Short press
-// triggers the module; long press returns home.
-
-static void create_test_page(void) {
-    g_page_test = create_page_container();
-
-    create_page_title(g_page_test, "掃描測試");
-
-    lv_obj_t* src = lv_label_create(g_page_test);
-#if HAS_UART_SCANNER
-    lv_label_set_text_fmt(src, "QL3301L  UART %d  TRIG %d", QR_UART_BAUD, QR_PIN_TRIG);
-#else
-    lv_label_set_text(src, "(no scan module) serial only");
-#endif
-    lv_obj_set_style_text_color(src, COL_SOFT, 0);
-    lv_obj_set_style_text_font(src, FONT_MAIN, 0);
-    lv_obj_align(src, LV_ALIGN_TOP_MID, 0, 30);
-
-    g_test_lbl_status = lv_label_create(g_page_test);
-    lv_label_set_text(g_test_lbl_status, "等待掃描");
-    lv_obj_set_style_text_color(g_test_lbl_status, COL_WARN, 0);
-    lv_obj_set_style_text_font(g_test_lbl_status, FONT_MAIN, 0);
-    lv_obj_align(g_test_lbl_status, LV_ALIGN_TOP_MID, 0, 56);
-
-    // Current scan: up to 3 wrapped lines, then "..." (content is <= 127 chars).
-    g_test_lbl_barcode = lv_label_create(g_page_test);
-    lv_label_set_text(g_test_lbl_barcode, "-");
-    lv_label_set_long_mode(g_test_lbl_barcode, LV_LABEL_LONG_DOT);
-    lv_obj_set_size(g_test_lbl_barcode, 224, 78);
-    lv_obj_set_style_text_color(g_test_lbl_barcode, COL_ACCENT, 0);
-    lv_obj_set_style_text_font(g_test_lbl_barcode, FONT_MAIN, 0);
-    lv_obj_set_style_text_align(g_test_lbl_barcode, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(g_test_lbl_barcode, LV_ALIGN_TOP_MID, 0, 86);
-
-    g_test_lbl_meta = lv_label_create(g_page_test);
-    lv_label_set_text(g_test_lbl_meta, "共 0 筆");
-    lv_obj_set_style_text_color(g_test_lbl_meta, COL_SOFT, 0);
-    lv_obj_set_style_text_font(g_test_lbl_meta, FONT_MAIN, 0);
-    lv_obj_align(g_test_lbl_meta, LV_ALIGN_TOP_MID, 0, 168);
-
-    g_test_lbl_history = lv_label_create(g_page_test);
-    lv_label_set_text(g_test_lbl_history, "");
-    lv_obj_set_width(g_test_lbl_history, 224);
-    lv_obj_set_style_text_color(g_test_lbl_history, COL_SOFT, 0);
-    lv_obj_set_style_text_font(g_test_lbl_history, FONT_MAIN, 0);
-    lv_obj_align(g_test_lbl_history, LV_ALIGN_TOP_MID, 0, 196);
-
-    lv_obj_t* hint = lv_label_create(g_page_test);
-    lv_label_set_text(hint, "短按:觸發掃描  長按:返回");
-    lv_obj_set_style_text_color(hint, COL_MUTED, 0);
-    lv_obj_set_style_text_font(hint, FONT_MAIN, 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -8);
-}
-
-// Called on the LVGL task for every scan while the TEST page is shown.
-static void test_page_on_scan(const char* type, const char* content) {
-    // Push the previous current scan into the history (newest first).
-    if (g_test_count > 0 && g_test_lbl_barcode) {
-        for (int i = TEST_HISTORY_N - 1; i > 0; i--) {
-            memcpy(g_test_hist[i], g_test_hist[i - 1], sizeof(g_test_hist[i]));
-        }
-        snprintf(g_test_hist[0], sizeof(g_test_hist[0]), "%s",
-                 lv_label_get_text(g_test_lbl_barcode));
-    }
-    g_test_count++;
-    g_test_waiting = false;
-
-    lv_label_set_text(g_test_lbl_status, "已收到");
-    lv_obj_set_style_text_color(g_test_lbl_status, COL_TEXT, 0);
-    lv_label_set_text(g_test_lbl_barcode, (content && content[0]) ? content : "(empty)");
-    lv_label_set_text_fmt(g_test_lbl_meta, "%s  長度 %u  共 %lu 筆",
-                          type ? type : "?", (unsigned)strlen(content ? content : ""),
-                          (unsigned long)g_test_count);
-
-    char hist[TEST_HISTORY_N * 28] = {0};
-    size_t off = 0;
-    for (int i = 0; i < TEST_HISTORY_N && g_test_hist[i][0]; i++) {
-        off += snprintf(hist + off, sizeof(hist) - off, "%s%lu. %s", i ? "\n" : "",
-                        (unsigned long)(g_test_count - 1 - i), g_test_hist[i]);
-        if (off >= sizeof(hist)) break;
-    }
-    lv_label_set_text(g_test_lbl_history, hist);
-
-    Serial.printf("[TEST] #%lu %s len=%u: %s\n", (unsigned long)g_test_count,
-                  type ? type : "?", (unsigned)strlen(content ? content : ""),
-                  content ? content : "");
-}
-
-// Called on the LVGL task each cycle while on TEST: turn "觸發中" into a
-// timeout message once the module released TRIG without a result.
-static void test_page_poll(void) {
-    if (g_test_waiting && !qr_scanner_is_triggering()) {
-        g_test_waiting = false;
-        lv_label_set_text(g_test_lbl_status, "逾時：未讀到條碼");
-        lv_obj_set_style_text_color(g_test_lbl_status, COL_ALERT, 0);
-    }
-}
-
-static void test_page_trigger(void) {
-#if HAS_UART_SCANNER
-    qr_scanner_trigger();
-    g_test_waiting = true;
-    lv_label_set_text(g_test_lbl_status, "觸發中...");
-    lv_obj_set_style_text_color(g_test_lbl_status, COL_WARN, 0);
-#endif
-}
-
 // ─── Navigation event handler ─────────────────────────────────────────────────
 // Called from loop() via ui_nav_event()
 
@@ -1426,17 +1282,6 @@ void ui_nav_event(nav_event_t ev) {
                 log_render();
             } else if (ev == NAV_CONFIRM) {
                 show_page(UI_PAGE_SETTINGS);   // log is reached from settings
-            }
-            break;
-        }
-
-        case UI_PAGE_TEST: {
-            if (ev == NAV_NEXT) {
-                test_page_trigger();
-            } else if (ev == NAV_CONFIRM) {
-                g_home_focus = 0;
-                update_home_focus();
-                show_page(UI_PAGE_HOME);
             }
             break;
         }
@@ -1868,8 +1713,6 @@ void ui_process_pending_scan(void) {
         }
     }
 
-    if (g_current_page == UI_PAGE_TEST) test_page_poll();
-
     if (!g_scan_pending) return;
 
     char type[16];
@@ -1884,10 +1727,6 @@ void ui_process_pending_scan(void) {
     portEXIT_CRITICAL(&g_scan_mux);
 
     // Only surface scans while the SCAN page is active.
-    if (g_current_page == UI_PAGE_TEST) {
-        test_page_on_scan(type, content);
-        return;
-    }
     if (g_current_page != UI_PAGE_SCAN) return;
 
     ui_on_scan(type, content);

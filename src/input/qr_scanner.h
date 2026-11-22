@@ -34,7 +34,4 @@ void qr_scanner_trigger(void);
 // Returns true if a decoded line was delivered during this call.
 bool qr_scanner_poll(void);
 
-// True while TRIG is held LOW (a read is in progress).
-bool qr_scanner_is_triggering(void);
-
 #endif /* QR_SCANNER_H */

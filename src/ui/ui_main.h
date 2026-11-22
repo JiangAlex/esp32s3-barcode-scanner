@@ -25,7 +25,6 @@ typedef enum {
     UI_PAGE_PHOTO,
     UI_PAGE_LOG,             // work log (placeholder in Phase A)
     UI_PAGE_ABOUT,           // firmware info (standalone page)
-    UI_PAGE_TEST,            // scan test: shows every raw scan (no business logic)
     UI_PAGE_COUNT
 } ui_page_t;
 

@@ -2452,7 +2452,7 @@ slider，屬 Phase A 刻意設計。使用者要求兩頁統一。來回確認�
 - 燒錄與長時間指令用 `nohup setsid ... > /tmp/xxx.log &` 在 ThinkPad 背景執行，避免 SSH 中斷遺失結果。
 - 讀 serial：pyserial 開埠後 DTR 低→高（觸發 `USB_UART_CHIP_RESET` 並讓韌體開始輸出）；LCD-2.8 不要用 RTS reset（會放開電源鎖存而斷電）。
 
-## 首頁「測試」頁（commit 4b965d2）
+## 首頁「測試」頁（commit 4b965d2，**已移除**，見下方「QL3301L 實機讀碼成功」）
 
 - 新增 `UI_PAGE_TEST`，首頁項目「測試」（位於「設定」與「關於」之間）。
 - 畫面：來源（`QL3301L UART 9600 TRIG 18`）、狀態（等待掃描 / 觸發中... / 已收到 / 逾時：未讀到條碼）、目前條碼（最多 3 行）、`類型 長度 N 共 N 筆`、最近 3 筆。
@@ -2461,8 +2461,20 @@ slider，屬 Phase A 刻意設計。使用者要求兩頁統一。來回確認�
 - 進此頁會關相機預覽（直畫 LCD 會蓋住 LVGL），只收 QL3301L 與 serial 注入。
 - 實機（Touch-LCD-2，未接模組）：serial `n n n c` 進入測試頁、注入 `RAC-28VP` → `[TEST] #1 SERIAL len=8: RAC-28VP`；短按 → `[QR] trigger`，5.0 s 後 `trigger timeout`。注意 lcd2 有相機，serial 全數字行會被當成對焦指令，不會注入。
 
+## ✅ QL3301L 實機讀碼成功（2026-11-22，Touch-LCD-2）
+
+- 接線：模組 TXD → 排針 pin 4 RXD（GPIO44），共地。**模組 TX 實測 3.3V**，直接接 ESP32-S3 即可，不需分壓。
+- 觸發：用模組板上的 TRIG（ESP32 GPIO18 未接到模組 TRIG）。因此測試頁短按（ESP32 拉 GPIO18）會顯示「逾時：未讀到條碼」，屬預期。
+- 模組已切成 TTL-232 串口輸出（出廠為 USB-HID）。
+- serial log：
+  - `[QR] scan: 2609021KN7BSHN` → `[TEST] #1 QL3301 len=14`（1D）
+  - `[QR] scan: http://invoice.etax.nat.gov.tw` → `[TEST] #2 / #3 QL3301 len=30`（QR，電子發票）
+- 驗證完成後依使用者要求**移除測試頁**（revert 4b965d2，含 `qr_scanner_is_triggering()`）。之後掃碼請在 SCAN 頁使用；serial log 仍會印 `[QR] scan: ...`。
+- 未驗證：SCAN 頁各模式（查詢 / BLE / MQTT / 進出貨 / 盤點）端到端、LCD-2.8 實機接模組、ESP32 GPIO18 驅動 TRIG。
+
 ## 已知限制 / 待辦
 
+- 若 GPIO18 不接模組 TRIG，SCAN 頁短按的 ESP32 觸發沒有作用（模組改用自身 TRIG）；可考慮設 `QR_PIN_TRIG -1` 關閉。
 - PHOTO 頁在 LCD-2.8 仍出現在首頁選單（原本就是空殼，且該板無相機）。
-- QL3301L 供電：專案記 5V，原廠手冊為 3.3V，接線前確認（#141）。
+- QL3301L 供電：專案記 5V，原廠手冊為 3.3V；實測模組 TX 為 3.3V 準位（#141）。
 - `docs/QL3301/` 兩份 PDF 僅在 ThinkPad 工作區，未入版控。

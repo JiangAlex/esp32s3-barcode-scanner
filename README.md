@@ -132,7 +132,7 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 
 | 頁面 | 功能 |
 |------|------|
-| 首頁 | 掃描 / 盤點 / 設定 / 測試 / 關於（列表選單） |
+| 首頁 | 掃描 / 盤點 / 設定 / 關於（列表選單） |
 | 掃描 | 短按觸發 QL3301L；長按切換模式（查詢/輸入/進貨/出貨/盤點）；Touch-LCD-2 另有相機預覽 |
 | 查詢結果 | 品名/規格/數量/儲位/供應商/入庫日 |
 | 盤點清單 | 累積品項列表 + 上傳 |
@@ -140,7 +140,6 @@ ESP32-S3 多功能條碼掃描器韌體 — 掃描查詢倉管 / BLE 無線條�
 | 設定 | WiFi / MQTT / BLE / 語言 / 亮度 / 音量 |
 | 虛擬鍵盤 | 英數輸入（設定用）|
 | 工作日誌 | 每日操作紀錄瀏覽 |
-| 測試 | 掃描測試：顯示每筆收到的條碼（內容 / 類型 / 長度 / 筆數 + 最近 3 筆），不記錄、不查詢、不送出；短按觸發 QL3301L、長按返回 |
 
 > 詳細 UI 設計請見 [docs/UI-design-zh.md](docs/UI-design-zh.md) / [docs/UI-design-en.md](docs/UI-design-en.md)
 
@@ -266,7 +265,7 @@ pio device monitor
 - **2026-10-21**（Redmine #101）：SD 工作日誌接通 + 實機除錯。後端 `scan_log`/`sd_card` 原本完整但從未被 main 呼叫；接進 setup + `ui_on_scan` 每次掃描記錄 + WiFi 連線 NTP 校時。修 3 個韌體 bug（路徑重複 `/sd/sd/`、`SD.mkdir` 全失敗改扁平根目錄檔、`readString()` 回空改 size-based read）。根因級發現：2 張故障/山寨卡（寫入配置 cluster 但 size 恆 0），加開機寫入健檢自動偵測停用。換新 SDHC 卡實機驗證通過。詳見 [docs/memory.md](docs/memory.md) Session 2026-10-20。
 - **2026-10-21**（Redmine #102）：BLE HID 無線條碼槍從零實作（README 核心賣點）。NimBLE-Arduino 自寫薄層 HID keyboard（避開 T-vK lib 對 arduino-esp32 3.x 的相容債）。依序突破 5 關：編譯、WiFi/BLE 共存 abort（`esp_wifi_deinit` 釋放 WiFi）、廣播無名（`adv->setName`）、HID 連線（Just-Works IO cap）、INPUT 模式 OOM（釋放 WiFi DRAM + framebuffer 移 PSRAM）。按需啟動（進 INPUT begin / 離開 stop），狀態列 [B] 圖示。共存壓測修 2 個 crash（onDisconnect 重廣播、刪靜態 callbacks）。手機配對實機驗證：掃描值完整打進文字框。**設計取捨**：單一 radio + DRAM 限制下，BLE 槍模式暫停 WiFi/MQTT。詳見 [docs/memory.md](docs/memory.md) Session 2026-10-21。
 - **2026-10-21**：scan-input（INPUT MQTT 子通道 → Web UI 即時填欄位，跨專案）。INPUT 模式拆為 `INPUT-BLE`（無線條碼槍）/`INPUT-MQTT`（推送 Web UI）兩子通道，長按循環切換、互斥（BLE 子通道起 BLE 關 WiFi；MQTT 子通道保留 WiFi）。韌體 `mqtt_scan_input()` publish `warehouse/scan-input/{device_id}`；server（barcode-warehouse-server）以 `scan_broadcaster`（asyncio.Queue + call_soon_threadsafe）+ SSE `/web/scan-stream` 即時推送到 item 表單欄位。server 本機端到端驗證、韌體實機 publish（live broker mosquitto_sub 收到）皆通過。詳見 [docs/memory.md](docs/memory.md) Session 2026-10-21 (B)。
-- **2026-11-22**：掃描來源改為外接 **QL3301L 二維碼掃描模組**（TTL-232 UART，模組內部解碼），兩個硬體版本共用同一組 GPIO（RX 44 / TX 43 / TRIG 18）。原因：相機 1D 解碼受定焦 / 光學限制（見 2026-09-27、2026-10-03 session）。新增第二個硬體版本 **ESP32-S3-LCD-2.8**（`env:lcd28`，無相機 / 觸控，SD 改 SD_MMC）；原 Touch-LCD-2 env 由 `esp32s3` 改名 `lcd2`。兩版皆已實機開機驗證，掃碼端到端待接上模組驗證（Redmine #141）。詳見 [docs/memory.md](docs/memory.md) Session 2026-11-22。
+- **2026-11-22**：掃描來源改為外接 **QL3301L 二維碼掃描模組**（TTL-232 UART，模組內部解碼），兩個硬體版本共用同一組 GPIO（RX 44 / TX 43 / TRIG 18）。原因：相機 1D 解碼受定焦 / 光學限制（見 2026-09-27、2026-10-03 session）。新增第二個硬體版本 **ESP32-S3-LCD-2.8**（`env:lcd28`，無相機 / 觸控，SD 改 SD_MMC）；原 Touch-LCD-2 env 由 `esp32s3` 改名 `lcd2`。兩版皆已實機開機驗證；Touch-LCD-2 已實機讀到 QL3301L 的 1D 與 QR 條碼（Redmine #141）。詳見 [docs/memory.md](docs/memory.md) Session 2026-11-22。
 
 ## License
 
