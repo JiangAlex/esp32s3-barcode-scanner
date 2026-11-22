@@ -513,7 +513,7 @@ void loop() {
     // Poll BOOT button (active LOW, pull-up so default HIGH).
     //   release <  300 ms           -> NAV_NEXT
     //   release 300 ms .. 1 s       -> NAV_CONFIRM
-    //   still held at 1 s           -> NAV_SCAN  (fires once)
+    //   still held at 1 s           -> NAV_SCAN  (fires once; SCAN / INVENTORY pages only)
     //   still held at 3 s           -> NAV_HOME  (fires once)
     // After NAV_SCAN / NAV_HOME has fired, the release does nothing.
     static bool     g_btn_was_pressed = false;
@@ -539,7 +539,12 @@ void loop() {
         }
     } else if (!cur && g_btn_was_pressed) {
         uint32_t held = millis() - g_btn_press_ms;
-        if (held > 1000 && !g_btn_scan_fired) {
+        // Hold-to-scan only where a scan makes sense; on every other page a
+        // long press of any length (released before 3 s) stays NAV_CONFIRM,
+        // so entering a menu item never turns into an ignored scan.
+        ui_page_t pg = ui_get_current_page();
+        bool scan_page = (pg == UI_PAGE_SCAN || pg == UI_PAGE_INVENTORY);
+        if (scan_page && held > 1000 && !g_btn_scan_fired) {
             g_btn_scan_fired = true;
             ui_nav_event(NAV_SCAN);
         }
