@@ -46,7 +46,8 @@ typedef enum {
     NAV_NONE = 0,
     NAV_NEXT,      // short press: advance to next item
     NAV_CONFIRM,   // long press: enter / confirm
-    NAV_HOME       // long hold: return to home
+    NAV_HOME,      // hold > 3 s: return to home
+    NAV_SCAN       // hold > 1 s: trigger a scan (SCAN page)
 } nav_event_t;
 
 // ─── Menu Items (per page) ────────────────────────────────────────────────────

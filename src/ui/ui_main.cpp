@@ -1127,6 +1127,21 @@ static void create_about_page(void) {
 void ui_nav_event(nav_event_t ev) {
     if (ev == NAV_NONE) return;
 
+    if (ev == NAV_SCAN) {
+        // Hold > 1 s: trigger one scan. Only meaningful on the SCAN page
+        // (scans on other pages are dropped by ui_process_pending_scan).
+        if (g_current_page == UI_PAGE_SCAN) {
+#if HAS_UART_SCANNER
+            qr_scanner_trigger();
+#elif HAS_CAMERA
+            scan_preview_request_hires();
+#endif
+        } else {
+            Serial.println("[UI] NAV_SCAN ignored (not on SCAN page)");
+        }
+        return;
+    }
+
     if (ev == NAV_HOME) {
         g_home_focus = 0;
         update_home_focus();

@@ -459,12 +459,13 @@ void loop() {
                     Serial.printf("[FOCUS] VCM=%u (nearer)\n", v);
                 }
 #endif
-            } else if (s_len == 0 && (c == 'n' || c == 'c' || c == 'h')) {
+            } else if (s_len == 0 && (c == 'n' || c == 'c' || c == 'h' || c == 'x')) {
                 // Single-char navigation command (emulates the BOOT key over
                 // serial, for testing without physical access):
                 //   n = NAV_NEXT (short press), c = NAV_CONFIRM (long press),
-                //   h = NAV_HOME (long hold).
+                //   h = NAV_HOME (long hold). (NAV_SCAN: 'x')
                 if (c == 'n')      { Serial.println("[SERIAL] NAV_NEXT");    ui_nav_event(NAV_NEXT); }
+                else if (c == 'x') { Serial.println("[SERIAL] NAV_SCAN");    ui_nav_event(NAV_SCAN); }
                 else if (c == 'c') { Serial.println("[SERIAL] NAV_CONFIRM"); ui_nav_event(NAV_CONFIRM); }
                 else               { Serial.println("[SERIAL] NAV_HOME");    ui_nav_event(NAV_HOME); }
             } else if (s_len == 0 && (c == 'b' || c == 'B' || c == 't' || c == 's')) {
@@ -484,6 +485,10 @@ void loop() {
                                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
                 }
+            } else if (s_len == 0 && c == 'g') {
+                // QL3301L pin diagnostic: TRIG level, RX idle level, bytes received.
+                qr_scanner_debug();
+                Serial.printf("[SERIAL] BOOT(GPIO%d) level=%d\n", PIN_BOOT_BTN, digitalRead(PIN_BOOT_BTN));
             } else if (s_len == 0 && c == 'd') {
                 // Dump today's work log from SD (diagnostic).
                 String js = scan_log_read(nullptr, 0, 100);
@@ -505,9 +510,16 @@ void loop() {
         }
     }
 
-    // Poll BOOT button (active LOW, pull-up so default HIGH)
+    // Poll BOOT button (active LOW, pull-up so default HIGH).
+    //   release <  300 ms           -> NAV_NEXT
+    //   release 300 ms .. 1 s       -> NAV_CONFIRM
+    //   still held at 1 s           -> NAV_SCAN  (fires once)
+    //   still held at 3 s           -> NAV_HOME  (fires once)
+    // After NAV_SCAN / NAV_HOME has fired, the release does nothing.
     static bool     g_btn_was_pressed = false;
-    static uint32_t g_btn_press_ms   = 0;
+    static uint32_t g_btn_press_ms    = 0;
+    static bool     g_btn_scan_fired  = false;
+    static bool     g_btn_home_fired  = false;
 
     bool cur = digitalRead(PIN_BOOT_BTN);
 
@@ -515,23 +527,25 @@ void loop() {
         // Pressed — record time
         g_btn_was_pressed = true;
         g_btn_press_ms = millis();
+        g_btn_scan_fired = false;
+        g_btn_home_fired = false;
         power_update_idle_time();  // wake on button press
     } else if (cur && g_btn_was_pressed) {
-        // Released — determine event type
+        // Released — short / long press only if no hold event fired
         uint32_t held = millis() - g_btn_press_ms;
         g_btn_was_pressed = false;
-
-        if (held < 300) {
-            ui_nav_event(NAV_NEXT);
-        } else {
-            ui_nav_event(NAV_CONFIRM);
+        if (!g_btn_scan_fired && !g_btn_home_fired) {
+            ui_nav_event(held < 300 ? NAV_NEXT : NAV_CONFIRM);
         }
     } else if (!cur && g_btn_was_pressed) {
-        // Held — check for long-hold (> 2000ms)
-        if ((millis() - g_btn_press_ms) > 2000) {
+        uint32_t held = millis() - g_btn_press_ms;
+        if (held > 1000 && !g_btn_scan_fired) {
+            g_btn_scan_fired = true;
+            ui_nav_event(NAV_SCAN);
+        }
+        if (held > 3000 && !g_btn_home_fired) {
+            g_btn_home_fired = true;
             ui_nav_event(NAV_HOME);
-            // Reset so we don't fire HOME again while still holding
-            g_btn_was_pressed = false;
         }
     }
 

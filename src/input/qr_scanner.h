@@ -34,4 +34,7 @@ void qr_scanner_trigger(void);
 // Returns true if a decoded line was delivered during this call.
 bool qr_scanner_poll(void);
 
+// Print TRIG pin level / state and UART byte count (serial command 'g').
+void qr_scanner_debug(void);
+
 #endif /* QR_SCANNER_H */

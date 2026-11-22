@@ -25,6 +25,7 @@ static size_t   s_len = 0;
 static bool     s_overflow = false;
 
 static bool     s_trig_active = false;
+static uint32_t s_rx_bytes = 0;      // total UART bytes received (diagnostic)
 static uint32_t s_trig_start_ms = 0;
 
 static void trig_release(void) {
@@ -63,6 +64,7 @@ bool qr_scanner_poll(void) {
 
     while (s_uart.available() > 0) {
         uint8_t c = (uint8_t)s_uart.read();
+        s_rx_bytes++;
 
         if (c == '\r' || c == '\n') {
             if (s_len == 0) continue;          // CRLF / blank line
@@ -94,11 +96,18 @@ bool qr_scanner_poll(void) {
     return delivered;
 }
 
+void qr_scanner_debug(void) {
+    Serial.printf("[QR] diag: TRIG(GPIO%d) level=%d driving_low=%d | RX(GPIO%d) level=%d | uart_rx_bytes=%lu\n",
+                  QR_PIN_TRIG, digitalRead(QR_PIN_TRIG), s_trig_active ? 1 : 0,
+                  QR_UART_RX, digitalRead(QR_UART_RX), (unsigned long)s_rx_bytes);
+}
+
 #else  // !HAS_UART_SCANNER — no-op stubs so callers need no #if
 
 void qr_scanner_init(void) {}
 void qr_scanner_set_cb(qr_scan_cb_t) {}
 void qr_scanner_trigger(void) {}
 bool qr_scanner_poll(void) { return false; }
+void qr_scanner_debug(void) {}
 
 #endif
